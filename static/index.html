@@ -360,17 +360,21 @@
       }, 1500);
 
       await new Promise((resolve, reject) => {
+        const started = Date.now();
         const poll = setInterval(async () => {
+          if (Date.now() - started > 600_000) {
+            clearInterval(poll); clearInterval(ticker);
+            reject(new Error('Délai dépassé (10 min). Essaie avec moins de pages.'));
+            return;
+          }
           try {
             const s = await fetch(`/status/${job_id}`);
             const data = await s.json();
             if (data.status === 'done') {
-              clearInterval(poll);
-              clearInterval(ticker);
+              clearInterval(poll); clearInterval(ticker);
               resolve(data);
             } else if (data.status === 'error') {
-              clearInterval(poll);
-              clearInterval(ticker);
+              clearInterval(poll); clearInterval(ticker);
               reject(new Error(data.error));
             }
           } catch (e) { /* réseau temporaire, on réessaie */ }
