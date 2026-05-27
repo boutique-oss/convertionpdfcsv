@@ -1,11 +1,15 @@
+import asyncio
 import os
 import shutil
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+
+_executor = ThreadPoolExecutor(max_workers=4)
 
 from core.extractor import extract_pages
 from core.agent import extract_articles
@@ -42,11 +46,16 @@ async def extract(
         pdf_path = tmp.name
 
     try:
-        pages = extract_pages(pdf_path, page_from, page_to, password)
+        loop = asyncio.get_event_loop()
+        pages = await loop.run_in_executor(
+            _executor, lambda: extract_pages(pdf_path, page_from, page_to, password)
+        )
         if not pages:
             raise HTTPException(status_code=422, detail="Aucune page dans la plage indiquée.")
 
-        articles = extract_articles(pages, margin_pct, default_unit)
+        articles = await loop.run_in_executor(
+            _executor, lambda: extract_articles(pages, margin_pct, default_unit)
+        )
         if not articles:
             raise HTTPException(status_code=422, detail="Aucun article détecté.")
 

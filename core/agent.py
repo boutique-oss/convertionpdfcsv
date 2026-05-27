@@ -19,8 +19,11 @@ def extract_articles(
     default_unit: str,
 ) -> list[dict]:
     """Call Claude to parse catalogue pages and return a list of article dicts."""
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(timeout=120.0)
     combined = "\n\n--- PAGE ---\n\n".join(pages_text)
+    # Tronque si trop long pour éviter les timeouts (≈ 60 pages max)
+    if len(combined) > 80_000:
+        combined = combined[:80_000]
     user_msg = f"Unité par défaut : {default_unit}\n\nTexte du catalogue :\n{combined}"
 
     message = client.messages.create(
