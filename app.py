@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -18,6 +19,12 @@ from core.csv_writer import to_csv
 load_dotenv()
 
 app = FastAPI(title="PDF → CSV Agent")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 _executor = ThreadPoolExecutor(max_workers=2)
 
 _jobs: dict[str, dict] = {}
