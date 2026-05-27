@@ -28,6 +28,7 @@ async def extract(
     page_to: int = Form(10),
     margin_pct: float = Form(30.0),
     default_unit: str = Form("Pièce"),
+    password: str = Form(""),
 ):
     if not pdf.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Le fichier doit être un PDF.")
@@ -37,7 +38,7 @@ async def extract(
         pdf_path = tmp.name
 
     try:
-        pages = extract_pages(pdf_path, page_from, page_to)
+        pages = extract_pages(pdf_path, page_from, page_to, password)
         if not pages:
             raise HTTPException(status_code=422, detail="Aucune page dans la plage indiquée.")
 
