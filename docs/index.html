@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PDF → CSV Agent</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #f8f9fa;
+      color: #212529;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      padding: 3rem 1rem;
+    }
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 2px 16px rgba(0,0,0,.08);
+      max-width: 680px;
+      width: 100%;
+      padding: 2.5rem 2rem;
+    }
+    h1 { font-size: 2rem; margin-bottom: .5rem; }
+    .badge {
+      display: inline-block;
+      background: #0d6efd;
+      color: #fff;
+      font-size: .75rem;
+      font-weight: 600;
+      padding: .2rem .6rem;
+      border-radius: 999px;
+      text-decoration: none;
+      margin-bottom: 1.5rem;
+    }
+    p { line-height: 1.7; color: #495057; margin-bottom: 1rem; }
+    ul { padding-left: 1.4rem; color: #495057; line-height: 1.9; margin-bottom: 1.5rem; }
+    .actions { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 1.5rem; }
+    .btn {
+      display: inline-block;
+      padding: .6rem 1.2rem;
+      border-radius: 8px;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: .9rem;
+      transition: opacity .15s;
+    }
+    .btn:hover { opacity: .85; }
+    .btn-primary { background: #0d6efd; color: #fff; }
+    .btn-secondary { background: #e9ecef; color: #212529; }
+    footer { margin-top: 2.5rem; font-size: .8rem; color: #adb5bd; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>PDF → CSV Agent</h1>
+    <a class="badge" href="https://github.com/boutique-oss/convertionpdfcsv/releases">v1.0.0</a>
+
+    <p>
+      Outil open-source qui extrait automatiquement les articles d'un catalogue PDF
+      (code, libellé, prix TTC) et génère un fichier CSV tarifaire prêt à l'import,
+      avec calcul du prix de vente HT selon votre taux de marge.
+    </p>
+
+    <p><strong>Fonctionnalités :</strong></p>
+    <ul>
+      <li>Extraction de texte page par page via PyMuPDF</li>
+      <li>Analyse IA (Claude Sonnet) avec sortie JSON stricte</li>
+      <li>Calcul automatique du PV HT depuis le prix TTC et la marge</li>
+      <li>Interface Gradio — aucun code requis</li>
+      <li>CSV encodé UTF-8 BOM, séparateur point-virgule (compatible Excel)</li>
+    </ul>
+
+    <div class="actions">
+      <a class="btn btn-primary" href="https://github.com/boutique-oss/convertionpdfcsv#readme">
+        Documentation (README)
+      </a>
+      <a class="btn btn-secondary" href="https://github.com/boutique-oss/convertionpdfcsv">
+        Code source
+      </a>
+    </div>
+  </div>
+  <footer>MIT License — boutique-oss</footer>
+</body>
+</html>
