@@ -1,74 +1,66 @@
 import os
+import shutil
 import tempfile
 
 from dotenv import load_dotenv
-import gradio as gr
-
-load_dotenv()
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from core.extractor import extract_pages
 from core.agent import extract_articles
 from core.csv_writer import to_csv
 
+load_dotenv()
 
-def process(pdf_file, page_from, page_to, margin_pct, default_unit):
-    if pdf_file is None:
-        return None, "Veuillez charger un fichier PDF."
+app = FastAPI(title="PDF → CSV Agent")
 
-    p_from, p_to = int(page_from), int(page_to)
-    if p_from > p_to:
-        return None, "La page de début doit être ≤ à la page de fin."
 
-    pages = extract_pages(pdf_file, p_from, p_to)
-    if not pages:
-        return None, "Aucune page extraite dans la plage indiquée."
+@app.get("/")
+async def index():
+    return FileResponse("static/index.html")
+
+
+@app.post("/extract")
+async def extract(
+    pdf: UploadFile = File(...),
+    page_from: int = Form(1),
+    page_to: int = Form(10),
+    margin_pct: float = Form(30.0),
+    default_unit: str = Form("Pièce"),
+):
+    if not pdf.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Le fichier doit être un PDF.")
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        shutil.copyfileobj(pdf.file, tmp)
+        pdf_path = tmp.name
 
     try:
-        articles = extract_articles(pages, float(margin_pct), default_unit)
-    except Exception as exc:
-        return None, f"Erreur lors de l'extraction IA : {exc}"
+        pages = extract_pages(pdf_path, page_from, page_to)
+        if not pages:
+            raise HTTPException(status_code=422, detail="Aucune page dans la plage indiquée.")
 
-    if not articles:
-        return None, "Aucun article détecté dans ces pages."
+        articles = extract_articles(pages, margin_pct, default_unit)
+        if not articles:
+            raise HTTPException(status_code=422, detail="Aucun article détecté.")
 
-    tmp = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
-    tmp.close()
-    to_csv(articles, tmp.name, float(margin_pct))
-    return tmp.name, f"{len(articles)} articles extraits."
+        out = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
+        out.close()
+        to_csv(articles, out.name, margin_pct)
 
-
-with gr.Blocks(title="PDF → CSV", theme=gr.themes.Soft()) as demo:
-    gr.Markdown(
-        "## PDF → CSV\n"
-        "Extrait les articles d'un catalogue PDF et génère un fichier CSV tarifaire prêt à l'import."
-    )
-
-    with gr.Row():
-        pdf_input = gr.File(label="Fichier PDF", file_types=[".pdf"], type="filepath")
-
-    with gr.Row():
-        page_from = gr.Slider(minimum=1, maximum=500, value=1, step=1, label="Page de")
-        page_to = gr.Slider(minimum=1, maximum=500, value=10, step=1, label="Page à")
-
-    with gr.Row():
-        margin_pct = gr.Number(value=30, minimum=0, maximum=100, label="Marge %")
-        default_unit = gr.Dropdown(
-            choices=["ML", "M²", "Pièce", "Rouleau"],
-            value="Pièce",
-            label="Unité par défaut",
+        return FileResponse(
+            out.name,
+            filename="articles.csv",
+            media_type="text/csv; charset=utf-8",
+            headers={"X-Article-Count": str(len(articles))},
         )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        os.unlink(pdf_path)
 
-    run_btn = gr.Button("Extraire → CSV", variant="primary")
 
-    with gr.Row():
-        csv_output = gr.File(label="Télécharger le CSV")
-        status_msg = gr.Textbox(label="Statut", interactive=False)
-
-    run_btn.click(
-        fn=process,
-        inputs=[pdf_input, page_from, page_to, margin_pct, default_unit],
-        outputs=[csv_output, status_msg],
-    )
-
-if __name__ == "__main__":
-    demo.launch()
+app.mount("/static", StaticFiles(directory="static"), name="static")
