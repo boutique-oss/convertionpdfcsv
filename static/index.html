@@ -342,11 +342,18 @@
 
     try {
       // 1. Upload → reçoit un job_id immédiatement
+      const base = window.location.origin;
       const fd = new FormData(form);
-      const uploadResp = await fetch('/extract', { method: 'POST', body: fd });
+      let uploadResp;
+      try {
+        uploadResp = await fetch(`${base}/extract`, { method: 'POST', body: fd });
+      } catch (netErr) {
+        throw new Error(`Réseau upload : ${netErr.message} (${base}/extract)`);
+      }
       if (!uploadResp.ok) {
-        const err = await uploadResp.json();
-        throw new Error(err.detail || 'Erreur envoi');
+        let detail = 'Erreur serveur';
+        try { detail = (await uploadResp.json()).detail; } catch(_) {}
+        throw new Error(`HTTP ${uploadResp.status} : ${detail}`);
       }
       const { job_id } = await uploadResp.json();
 
@@ -368,7 +375,7 @@
             return;
           }
           try {
-            const s = await fetch(`/status/${job_id}`);
+            const s = await fetch(`${base}/status/${job_id}`);
             const data = await s.json();
             if (data.status === 'done') {
               clearInterval(poll); clearInterval(ticker);
@@ -384,7 +391,7 @@
         progressWrap.classList.remove('visible');
 
         // 3. Téléchargement du CSV
-        const dlResp = await fetch(`/download/${job_id}`);
+        const dlResp = await fetch(`${base}/download/${job_id}`);
         const blob = await dlResp.blob();
         const url = URL.createObjectURL(blob);
 
