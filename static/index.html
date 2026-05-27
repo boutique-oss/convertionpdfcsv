@@ -341,14 +341,21 @@
     submitBtn.disabled = true;
 
     try {
-      // 1. Upload → reçoit un job_id immédiatement
       const base = window.location.origin;
+
+      // 0. Ping pour réveiller le Space si endormi
+      progressLbl.textContent = 'Vérification du serveur…';
+      try { await fetch(`${base}/ping`); } catch(_) {}
+
+      // 1. Upload → reçoit un job_id immédiatement
+      progressBar.style.width = '10%';
+      progressLbl.textContent = 'Envoi du fichier…';
       const fd = new FormData(form);
       let uploadResp;
       try {
         uploadResp = await fetch(`${base}/extract`, { method: 'POST', body: fd });
       } catch (netErr) {
-        throw new Error(`Réseau upload : ${netErr.message} (${base}/extract)`);
+        throw new Error(`Erreur réseau lors de l'envoi : ${netErr.message}`);
       }
       if (!uploadResp.ok) {
         let detail = 'Erreur serveur';

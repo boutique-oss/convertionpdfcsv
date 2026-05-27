@@ -2,6 +2,7 @@ import asyncio
 import os
 import shutil
 import tempfile
+import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
@@ -17,10 +18,11 @@ from core.csv_writer import to_csv
 load_dotenv()
 
 app = FastAPI(title="PDF → CSV Agent")
-_executor = ThreadPoolExecutor(max_workers=4)
+_executor = ThreadPoolExecutor(max_workers=2)
 
-# In-memory job store: job_id → {"status", "result", "error", "count"}
 _jobs: dict[str, dict] = {}
+
+MAX_PDF_MB = 50
 
 
 def _run_job(job_id: str, pdf_path: str, page_from: int, page_to: int,
@@ -28,23 +30,34 @@ def _run_job(job_id: str, pdf_path: str, page_from: int, page_to: int,
     try:
         pages = extract_pages(pdf_path, page_from, page_to, password)
         if not pages:
-            _jobs[job_id] = {"status": "error", "error": "Aucune page dans la plage indiquée."}
+            _jobs[job_id] = {"status": "error", "error": "Aucune page extraite dans la plage indiquée."}
             return
 
         articles = extract_articles(pages, margin_pct, default_unit)
         if not articles:
-            _jobs[job_id] = {"status": "error", "error": "Aucun article détecté."}
+            _jobs[job_id] = {"status": "error", "error": "Aucun article détecté dans ces pages."}
             return
 
         out = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
         out.close()
         to_csv(articles, out.name, margin_pct)
         _jobs[job_id] = {"status": "done", "result": out.name, "count": len(articles)}
+
     except Exception as exc:
-        _jobs[job_id] = {"status": "error", "error": str(exc)}
+        _jobs[job_id] = {
+            "status": "error",
+            "error": f"{type(exc).__name__}: {exc}\n{traceback.format_exc()[-500:]}",
+        }
     finally:
-        if os.path.exists(pdf_path):
+        try:
             os.unlink(pdf_path)
+        except OSError:
+            pass
+
+
+@app.get("/ping")
+async def ping():
+    return {"ok": True}
 
 
 @app.get("/")
@@ -64,12 +77,26 @@ async def extract(
     if not pdf.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Le fichier doit être un PDF.")
     if page_to > 300:
-        raise HTTPException(status_code=400, detail="La limite est de 300 pages maximum.")
+        raise HTTPException(status_code=400, detail="Limite : 300 pages maximum.")
     if page_from > page_to:
-        raise HTTPException(status_code=400, detail="La page de début doit être ≤ à la page de fin.")
+        raise HTTPException(status_code=400, detail="Page de début > page de fin.")
 
+    # Sauvegarde du PDF en lisant par chunks pour éviter l'OOM
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-        shutil.copyfileobj(pdf.file, tmp)
+        size = 0
+        chunk_size = 1024 * 1024  # 1 MB
+        while True:
+            chunk = await pdf.read(chunk_size)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > MAX_PDF_MB * 1024 * 1024:
+                os.unlink(tmp.name)
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"PDF trop volumineux (max {MAX_PDF_MB} MB)."
+                )
+            tmp.write(chunk)
         pdf_path = tmp.name
 
     job_id = str(uuid.uuid4())
