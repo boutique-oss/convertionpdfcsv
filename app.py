@@ -1,7 +1,10 @@
 import os
 import tempfile
 
+from dotenv import load_dotenv
 import gradio as gr
+
+load_dotenv()
 
 from core.extractor import extract_pages
 from core.agent import extract_articles

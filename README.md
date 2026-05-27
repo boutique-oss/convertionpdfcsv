@@ -1,3 +1,14 @@
+---
+title: PDF CSV Agent
+emoji: 📄
+colorFrom: blue
+colorTo: green
+sdk: gradio
+sdk_version: 4.44.0
+app_file: app.py
+pinned: false
+---
+
 # PDF → CSV Agent
 
 Extrait les articles d'un catalogue PDF et génère un fichier CSV tarifaire prêt à l'import.
