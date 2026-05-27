@@ -32,6 +32,10 @@ async def extract(
 ):
     if not pdf.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Le fichier doit être un PDF.")
+    if page_to > 300:
+        raise HTTPException(status_code=400, detail="La limite est de 300 pages maximum.")
+    if page_from > page_to:
+        raise HTTPException(status_code=400, detail="La page de début doit être ≤ à la page de fin.")
 
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         shutil.copyfileobj(pdf.file, tmp)
