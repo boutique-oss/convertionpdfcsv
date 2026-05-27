@@ -333,46 +333,65 @@
   form.addEventListener('submit', async e => {
     e.preventDefault();
 
-    // Reset
     result.className = 'result';
     result.innerHTML = '';
     progressWrap.classList.add('visible');
-    progressBar.style.width = '10%';
+    progressBar.style.width = '5%';
     progressLbl.textContent = 'Envoi du fichier…';
     submitBtn.disabled = true;
 
-    // Animate progress (fake)
-    let pct = 10;
-    const ticker = setInterval(() => {
-      if (pct < 85) { pct += 3; progressBar.style.width = pct + '%'; }
-    }, 600);
-
-    progressLbl.textContent = 'Analyse IA en cours…';
-
     try {
+      // 1. Upload → reçoit un job_id immédiatement
       const fd = new FormData(form);
-      const resp = await fetch('/extract', { method: 'POST', body: fd });
-
-      clearInterval(ticker);
-      progressBar.style.width = '100%';
-
-      if (!resp.ok) {
-        const err = await resp.json();
-        throw new Error(err.detail || 'Erreur serveur');
+      const uploadResp = await fetch('/extract', { method: 'POST', body: fd });
+      if (!uploadResp.ok) {
+        const err = await uploadResp.json();
+        throw new Error(err.detail || 'Erreur envoi');
       }
+      const { job_id } = await uploadResp.json();
 
-      const count = resp.headers.get('X-Article-Count') || '?';
-      const blob  = await resp.blob();
-      const url   = URL.createObjectURL(blob);
+      progressBar.style.width = '20%';
+      progressLbl.textContent = 'Analyse IA en cours…';
 
-      progressWrap.classList.remove('visible');
-      result.className = 'result success';
-      result.innerHTML = `
-        <div class="result-text"><strong>${count}</strong> articles extraits</div>
-        <a class="download-btn" href="${url}" download="articles.csv">Télécharger CSV</a>
-      `;
+      // 2. Polling toutes les 3s jusqu'à done/error
+      let pct = 20;
+      const ticker = setInterval(() => {
+        if (pct < 90) { pct += 2; progressBar.style.width = pct + '%'; }
+      }, 1500);
+
+      await new Promise((resolve, reject) => {
+        const poll = setInterval(async () => {
+          try {
+            const s = await fetch(`/status/${job_id}`);
+            const data = await s.json();
+            if (data.status === 'done') {
+              clearInterval(poll);
+              clearInterval(ticker);
+              resolve(data);
+            } else if (data.status === 'error') {
+              clearInterval(poll);
+              clearInterval(ticker);
+              reject(new Error(data.error));
+            }
+          } catch (e) { /* réseau temporaire, on réessaie */ }
+        }, 3000);
+      }).then(async (data) => {
+        progressBar.style.width = '100%';
+        progressWrap.classList.remove('visible');
+
+        // 3. Téléchargement du CSV
+        const dlResp = await fetch(`/download/${job_id}`);
+        const blob = await dlResp.blob();
+        const url = URL.createObjectURL(blob);
+
+        result.className = 'result success';
+        result.innerHTML = `
+          <div class="result-text"><strong>${data.count}</strong> articles extraits</div>
+          <a class="download-btn" href="${url}" download="articles.csv">Télécharger CSV</a>
+        `;
+      });
+
     } catch (err) {
-      clearInterval(ticker);
       progressWrap.classList.remove('visible');
       result.className = 'result error';
       result.textContent = err.message;

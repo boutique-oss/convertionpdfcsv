@@ -2,14 +2,13 @@ import asyncio
 import os
 import shutil
 import tempfile
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-
-_executor = ThreadPoolExecutor(max_workers=4)
 
 from core.extractor import extract_pages
 from core.agent import extract_articles
@@ -18,6 +17,34 @@ from core.csv_writer import to_csv
 load_dotenv()
 
 app = FastAPI(title="PDF → CSV Agent")
+_executor = ThreadPoolExecutor(max_workers=4)
+
+# In-memory job store: job_id → {"status", "result", "error", "count"}
+_jobs: dict[str, dict] = {}
+
+
+def _run_job(job_id: str, pdf_path: str, page_from: int, page_to: int,
+             margin_pct: float, default_unit: str, password: str):
+    try:
+        pages = extract_pages(pdf_path, page_from, page_to, password)
+        if not pages:
+            _jobs[job_id] = {"status": "error", "error": "Aucune page dans la plage indiquée."}
+            return
+
+        articles = extract_articles(pages, margin_pct, default_unit)
+        if not articles:
+            _jobs[job_id] = {"status": "error", "error": "Aucun article détecté."}
+            return
+
+        out = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
+        out.close()
+        to_csv(articles, out.name, margin_pct)
+        _jobs[job_id] = {"status": "done", "result": out.name, "count": len(articles)}
+    except Exception as exc:
+        _jobs[job_id] = {"status": "error", "error": str(exc)}
+    finally:
+        if os.path.exists(pdf_path):
+            os.unlink(pdf_path)
 
 
 @app.get("/")
@@ -45,36 +72,42 @@ async def extract(
         shutil.copyfileobj(pdf.file, tmp)
         pdf_path = tmp.name
 
-    try:
-        loop = asyncio.get_event_loop()
-        pages = await loop.run_in_executor(
-            _executor, lambda: extract_pages(pdf_path, page_from, page_to, password)
-        )
-        if not pages:
-            raise HTTPException(status_code=422, detail="Aucune page dans la plage indiquée.")
+    job_id = str(uuid.uuid4())
+    _jobs[job_id] = {"status": "processing"}
 
-        articles = await loop.run_in_executor(
-            _executor, lambda: extract_articles(pages, margin_pct, default_unit)
-        )
-        if not articles:
-            raise HTTPException(status_code=422, detail="Aucun article détecté.")
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(
+        _executor,
+        _run_job,
+        job_id, pdf_path, page_from, page_to, margin_pct, default_unit, password,
+    )
 
-        out = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
-        out.close()
-        to_csv(articles, out.name, margin_pct)
+    return JSONResponse({"job_id": job_id})
 
-        return FileResponse(
-            out.name,
-            filename="articles.csv",
-            media_type="text/csv; charset=utf-8",
-            headers={"X-Article-Count": str(len(articles))},
-        )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-    finally:
-        os.unlink(pdf_path)
+
+@app.get("/status/{job_id}")
+async def status(job_id: str):
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job introuvable.")
+    if job["status"] == "error":
+        return JSONResponse({"status": "error", "error": job["error"]})
+    if job["status"] == "done":
+        return JSONResponse({"status": "done", "count": job["count"]})
+    return JSONResponse({"status": "processing"})
+
+
+@app.get("/download/{job_id}")
+async def download(job_id: str):
+    job = _jobs.get(job_id)
+    if not job or job["status"] != "done":
+        raise HTTPException(status_code=404, detail="Résultat non disponible.")
+    return FileResponse(
+        job["result"],
+        filename="articles.csv",
+        media_type="text/csv; charset=utf-8",
+        headers={"X-Article-Count": str(job["count"])},
+    )
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
