@@ -12,7 +12,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from core.extractor import extract_pages
 from core.agent import extract_articles
 from core.csv_writer import to_csv
 
@@ -35,15 +34,12 @@ MAX_PDF_MB = 50
 def _run_job(job_id: str, pdf_path: str, page_from: int, page_to: int,
              default_unit: str, password: str):
     try:
-        pages = extract_pages(pdf_path, page_from, page_to, password)
-        if not pages:
-            _jobs[job_id] = {"status": "error", "error": "Aucune page extraite dans la plage indiquée."}
-            return
-
         def _progress(done, total):
             _jobs[job_id]["progress"] = f"{done}/{total}"
 
-        articles = extract_articles(pages, default_unit, progress_cb=_progress)
+        articles = extract_articles(
+            pdf_path, page_from, page_to, password, default_unit, progress_cb=_progress
+        )
         if not articles:
             _jobs[job_id] = {"status": "error", "error": "Aucun article détecté dans ces pages."}
             return

@@ -1,3 +1,4 @@
+import base64
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
@@ -5,18 +6,29 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 import anthropic
 
 _SYSTEM = """\
-Tu es un extracteur d'articles de catalogue. À partir du texte de pages PDF, \
-extrais chaque article et retourne UNIQUEMENT un tableau JSON valide.
+Tu es un extracteur de données de catalogue. À partir des images de pages fournies, \
+identifie chaque produit, référence, tissu, coloris ou article listé — \
+quel que soit le terme utilisé dans le document — \
+et retourne UNIQUEMENT un tableau JSON valide.
 Chaque objet doit avoir exactement ces quatre champs :
-- "code"     : string  — référence/code article, chaîne vide si absent
-- "libelle"  : string  — désignation complète de l'article
-- "prix_ttc" : number  — prix TTC en euros (0 si absent ou non trouvé)
-- "unite"    : string  — unité de vente ; utilise l'unité par défaut fournie si non précisée
+- "code"     : string  — tout code, référence, SKU ou numéro identifiant le produit (vide si absent)
+- "libelle"  : string  — désignation, nom, coloris ou description du produit
+- "prix_ttc" : number  — tout prix affiché en euros, TTC ou HT (0 si absent)
+- "unite"    : string  — unité de vente (utilise l'unité par défaut si non précisée)
 Ne retourne aucun texte, commentaire ou balise avant ou après le tableau JSON.\
 """
 
-_BATCH_SIZE = 5   # pages par appel Claude
-_BATCH_TIMEOUT = 90  # secondes max par batch
+_BATCH_SIZE = 3    # pages par appel Claude Vision (images = plus lourd)
+_BATCH_TIMEOUT = 120
+_DPI = 150         # résolution de rendu des pages
+
+
+def _page_to_image_b64(page) -> str:
+    """Render a PDF page to a base64-encoded PNG."""
+    import fitz
+    mat = fitz.Matrix(_DPI / 72, _DPI / 72)
+    pix = page.get_pixmap(matrix=mat, alpha=False)
+    return base64.standard_b64encode(pix.tobytes("png")).decode()
 
 
 def _parse_json_safe(raw: str) -> list[dict]:
@@ -26,7 +38,6 @@ def _parse_json_safe(raw: str) -> list[dict]:
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        # Récupère les objets complets si le JSON est tronqué
         results = []
         for obj in re.findall(r'\{[^{}]*\}', raw):
             try:
@@ -36,35 +47,58 @@ def _parse_json_safe(raw: str) -> list[dict]:
         return results
 
 
-def _call_claude(client: anthropic.Anthropic, batch: list[str], default_unit: str) -> list[dict]:
-    combined = "\n\n--- PAGE ---\n\n".join(batch)
-    user_msg = f"Unité par défaut : {default_unit}\n\nTexte du catalogue :\n{combined}"
+def _call_claude_vision(
+    client: anthropic.Anthropic,
+    pages,           # list of fitz.Page objects
+    default_unit: str,
+) -> list[dict]:
+    content = []
+    for page in pages:
+        b64 = _page_to_image_b64(page)
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": b64},
+        })
+    content.append({
+        "type": "text",
+        "text": f"Unité par défaut : {default_unit}\nExtrait tous les produits/références de ces pages.",
+    })
+
     message = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=16000,
         system=_SYSTEM,
-        messages=[{"role": "user", "content": user_msg}],
+        messages=[{"role": "user", "content": content}],
     )
     return _parse_json_safe(message.content[0].text)
 
 
 def extract_articles(
-    pages_text: list[str],
+    pdf_path: str,
+    page_from: int,
+    page_to: int,
+    password: str,
     default_unit: str,
     progress_cb=None,
 ) -> list[dict]:
-    """
-    Process pages in batches with a per-batch timeout.
-    progress_cb(batch_index, total_batches) called after each batch.
-    Failed/timed-out batches are skipped.
-    """
+    """Render PDF pages as images and extract products via Claude Vision."""
+    import fitz
+    doc = fitz.open(pdf_path)
+    if doc.is_encrypted:
+        if not doc.authenticate(password):
+            raise ValueError("Mot de passe PDF incorrect.")
+
+    start = max(0, page_from - 1)
+    end = min(doc.page_count, page_to)
+    all_pages = [doc[i] for i in range(start, end)]
+
     client = anthropic.Anthropic(timeout=_BATCH_TIMEOUT + 10)
     all_articles: list[dict] = []
-    batches = [pages_text[i:i + _BATCH_SIZE] for i in range(0, len(pages_text), _BATCH_SIZE)]
+    batches = [all_pages[i:i + _BATCH_SIZE] for i in range(0, len(all_pages), _BATCH_SIZE)]
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         for i, batch in enumerate(batches):
-            future = pool.submit(_call_claude, client, batch, default_unit)
+            future = pool.submit(_call_claude_vision, client, batch, default_unit)
             try:
                 articles = future.result(timeout=_BATCH_TIMEOUT)
                 all_articles.extend(articles)
@@ -76,11 +110,9 @@ def extract_articles(
                     "Vérifie ANTHROPIC_API_KEY dans les secrets HF Spaces."
                 ) from exc
             except anthropic.AuthenticationError as exc:
-                raise RuntimeError(
-                    "Clé API Anthropic invalide ou expirée."
-                ) from exc
+                raise RuntimeError("Clé API Anthropic invalide ou expirée.") from exc
             except Exception:
-                pass  # JSON tronqué ou autre → batch ignoré
+                pass  # batch ignoré
 
             if progress_cb:
                 progress_cb(i + 1, len(batches))
