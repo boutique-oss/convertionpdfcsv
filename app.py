@@ -40,7 +40,10 @@ def _run_job(job_id: str, pdf_path: str, page_from: int, page_to: int,
             _jobs[job_id] = {"status": "error", "error": "Aucune page extraite dans la plage indiquée."}
             return
 
-        articles = extract_articles(pages, margin_pct, default_unit)
+        def _progress(done, total):
+            _jobs[job_id]["progress"] = f"{done}/{total}"
+
+        articles = extract_articles(pages, margin_pct, default_unit, progress_cb=_progress)
         if not articles:
             _jobs[job_id] = {"status": "error", "error": "Aucun article détecté dans ces pages."}
             return
@@ -132,6 +135,8 @@ async def status(job_id: str):
         return JSONResponse({"status": "error", "error": job["error"]})
     if job["status"] == "done":
         return JSONResponse({"status": "done", "count": job["count"]})
+    if job.get("progress"):
+        return JSONResponse({"status": "processing", "progress": job["progress"]})
     return JSONResponse({"status": "processing"})
 
 

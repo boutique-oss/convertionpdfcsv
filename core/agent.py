@@ -1,5 +1,7 @@
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+
 import anthropic
 
 _SYSTEM = """\
@@ -13,22 +15,20 @@ Chaque objet doit avoir exactement ces quatre champs :
 Ne retourne aucun texte, commentaire ou balise avant ou après le tableau JSON.\
 """
 
-_BATCH_SIZE = 5  # pages par appel Claude
+_BATCH_SIZE = 5   # pages par appel Claude
+_BATCH_TIMEOUT = 90  # secondes max par batch
 
 
 def _parse_json_safe(raw: str) -> list[dict]:
-    """Try to parse JSON, recovering truncated arrays if possible."""
     raw = raw.strip()
-    # Retire les fences markdown
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        # Tente de récupérer les objets complets si le JSON est tronqué
-        objects = re.findall(r'\{[^{}]*\}', raw)
+        # Récupère les objets complets si le JSON est tronqué
         results = []
-        for obj in objects:
+        for obj in re.findall(r'\{[^{}]*\}', raw):
             try:
                 results.append(json.loads(obj))
             except json.JSONDecodeError:
@@ -45,37 +45,45 @@ def _call_claude(client: anthropic.Anthropic, batch: list[str], default_unit: st
         system=_SYSTEM,
         messages=[{"role": "user", "content": user_msg}],
     )
-    raw = message.content[0].text
-    return _parse_json_safe(raw)
+    return _parse_json_safe(message.content[0].text)
 
 
 def extract_articles(
     pages_text: list[str],
     margin_pct: float,
     default_unit: str,
+    progress_cb=None,
 ) -> list[dict]:
-    """Process pages in batches — skips failed batches, returns all collected articles."""
-    client = anthropic.Anthropic(timeout=180.0)
+    """
+    Process pages in batches with a per-batch timeout.
+    progress_cb(batch_index, total_batches) called after each batch.
+    Failed/timed-out batches are skipped.
+    """
+    client = anthropic.Anthropic(timeout=_BATCH_TIMEOUT + 10)
     all_articles: list[dict] = []
     batches = [pages_text[i:i + _BATCH_SIZE] for i in range(0, len(pages_text), _BATCH_SIZE)]
 
-    for i, batch in enumerate(batches):
-        try:
-            articles = _call_claude(client, batch, default_unit)
-            all_articles.extend(articles)
-        except anthropic.APIConnectionError as exc:
-            # Erreur réseau vers l'API → fatale, on arrête tout
-            raise RuntimeError(
-                "Impossible de joindre l'API Anthropic. "
-                "Vérifie que ANTHROPIC_API_KEY est bien configurée dans les secrets HF Spaces."
-            ) from exc
-        except anthropic.AuthenticationError as exc:
-            raise RuntimeError(
-                "Clé API Anthropic invalide ou expirée. "
-                "Vérifie la valeur de ANTHROPIC_API_KEY dans les secrets HF Spaces."
-            ) from exc
-        except Exception:
-            # Autre erreur (JSON tronqué, timeout isolé) → on passe au batch suivant
-            continue
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        for i, batch in enumerate(batches):
+            future = pool.submit(_call_claude, client, batch, default_unit)
+            try:
+                articles = future.result(timeout=_BATCH_TIMEOUT)
+                all_articles.extend(articles)
+            except FutureTimeout:
+                future.cancel()
+            except anthropic.APIConnectionError as exc:
+                raise RuntimeError(
+                    "Impossible de joindre l'API Anthropic. "
+                    "Vérifie ANTHROPIC_API_KEY dans les secrets HF Spaces."
+                ) from exc
+            except anthropic.AuthenticationError as exc:
+                raise RuntimeError(
+                    "Clé API Anthropic invalide ou expirée."
+                ) from exc
+            except Exception:
+                pass  # JSON tronqué ou autre → batch ignoré
+
+            if progress_cb:
+                progress_cb(i + 1, len(batches))
 
     return all_articles

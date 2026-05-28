@@ -390,6 +390,11 @@
             } else if (data.status === 'error') {
               clearInterval(poll); clearInterval(ticker);
               reject(new Error(data.error));
+            } else if (data.progress) {
+              const [done, total] = data.progress.split('/').map(Number);
+              const pct = 20 + Math.round((done / total) * 75);
+              progressBar.style.width = pct + '%';
+              progressLbl.textContent = `Batch ${done}/${total} traité…`;
             }
           } catch (e) { /* réseau temporaire, on réessaie */ }
         }, 3000);
