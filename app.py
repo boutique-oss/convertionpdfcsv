@@ -48,7 +48,11 @@ def _run_job(job_id: str, pdf_path: str, page_from: int, page_to: int,
         out = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
         out.close()
         to_csv(articles, out.name, margin_pct)
-        _jobs[job_id] = {"status": "done", "result": out.name, "count": len(articles)}
+        _jobs[job_id] = {
+            "status": "done",
+            "result": out.name,
+            "count": len(articles),
+        }
 
     except Exception as exc:
         _jobs[job_id] = {
