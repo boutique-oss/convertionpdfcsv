@@ -32,7 +32,7 @@ MAX_PDF_MB = 50
 
 
 def _run_job(job_id: str, pdf_path: str, page_from: int, page_to: int,
-             default_unit: str, password: str):
+             default_unit: str, brand: str, password: str):
     try:
         def _progress(done, total):
             _jobs[job_id]["progress"] = f"{done}/{total}"
@@ -46,7 +46,7 @@ def _run_job(job_id: str, pdf_path: str, page_from: int, page_to: int,
 
         out = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
         out.close()
-        to_csv(articles, out.name)
+        to_csv(articles, out.name, brand)
         _jobs[job_id] = {
             "status": "done",
             "result": out.name,
@@ -103,6 +103,7 @@ async def extract(
     page_from: int = Form(1),
     page_to: int = Form(10),
     default_unit: str = Form("Pièce"),
+    brand: str = Form(""),
     password: str = Form(""),
 ):
     if not pdf.filename.lower().endswith(".pdf"):
@@ -137,7 +138,7 @@ async def extract(
     loop.run_in_executor(
         _executor,
         _run_job,
-        job_id, pdf_path, page_from, page_to, default_unit, password,
+        job_id, pdf_path, page_from, page_to, default_unit, brand, password,
     )
 
     return JSONResponse({"job_id": job_id})
