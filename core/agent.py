@@ -63,8 +63,19 @@ def extract_articles(
         try:
             articles = _call_claude(client, batch, default_unit)
             all_articles.extend(articles)
+        except anthropic.APIConnectionError as exc:
+            # Erreur réseau vers l'API → fatale, on arrête tout
+            raise RuntimeError(
+                "Impossible de joindre l'API Anthropic. "
+                "Vérifie que ANTHROPIC_API_KEY est bien configurée dans les secrets HF Spaces."
+            ) from exc
+        except anthropic.AuthenticationError as exc:
+            raise RuntimeError(
+                "Clé API Anthropic invalide ou expirée. "
+                "Vérifie la valeur de ANTHROPIC_API_KEY dans les secrets HF Spaces."
+            ) from exc
         except Exception:
-            # Batch raté → on continue avec les suivants
+            # Autre erreur (JSON tronqué, timeout isolé) → on passe au batch suivant
             continue
 
     return all_articles
