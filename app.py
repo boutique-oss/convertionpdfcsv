@@ -33,7 +33,7 @@ MAX_PDF_MB = 50
 
 
 def _run_job(job_id: str, pdf_path: str, page_from: int, page_to: int,
-             margin_pct: float, default_unit: str, password: str):
+             default_unit: str, password: str):
     try:
         pages = extract_pages(pdf_path, page_from, page_to, password)
         if not pages:
@@ -119,7 +119,7 @@ async def extract(
     loop.run_in_executor(
         _executor,
         _run_job,
-        job_id, pdf_path, page_from, page_to, margin_pct, default_unit, password,
+        job_id, pdf_path, page_from, page_to, default_unit, password,
     )
 
     return JSONResponse({"job_id": job_id})
