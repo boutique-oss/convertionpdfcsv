@@ -50,7 +50,6 @@ def _call_claude(client: anthropic.Anthropic, batch: list[str], default_unit: st
 
 def extract_articles(
     pages_text: list[str],
-    margin_pct: float,
     default_unit: str,
     progress_cb=None,
 ) -> list[dict]:

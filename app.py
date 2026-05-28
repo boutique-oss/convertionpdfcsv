@@ -43,14 +43,14 @@ def _run_job(job_id: str, pdf_path: str, page_from: int, page_to: int,
         def _progress(done, total):
             _jobs[job_id]["progress"] = f"{done}/{total}"
 
-        articles = extract_articles(pages, margin_pct, default_unit, progress_cb=_progress)
+        articles = extract_articles(pages, default_unit, progress_cb=_progress)
         if not articles:
             _jobs[job_id] = {"status": "error", "error": "Aucun article détecté dans ces pages."}
             return
 
         out = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
         out.close()
-        to_csv(articles, out.name, margin_pct)
+        to_csv(articles, out.name)
         _jobs[job_id] = {
             "status": "done",
             "result": out.name,
@@ -84,7 +84,6 @@ async def extract(
     pdf: UploadFile = File(...),
     page_from: int = Form(1),
     page_to: int = Form(10),
-    margin_pct: float = Form(30.0),
     default_unit: str = Form("Pièce"),
     password: str = Form(""),
 ):
