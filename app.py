@@ -74,6 +74,28 @@ async def ping():
     return {"ok": True}
 
 
+@app.post("/preview")
+async def preview(
+    pdf: UploadFile = File(...),
+    page_from: int = Form(1),
+    page_to: int = Form(3),
+    password: str = Form(""),
+):
+    """Retourne les 300 premiers caractères de chaque page pour diagnostic."""
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        shutil.copyfileobj(pdf.file, tmp)
+        pdf_path = tmp.name
+    try:
+        pages = extract_pages(pdf_path, page_from, page_to, password)
+        previews = [
+            {"page": page_from + i, "chars": len(p), "extract": p[:300]}
+            for i, p in enumerate(pages)
+        ]
+        return JSONResponse({"pages": previews})
+    finally:
+        os.unlink(pdf_path)
+
+
 @app.get("/")
 async def index():
     return FileResponse("static/index.html")
