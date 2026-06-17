@@ -100,6 +100,34 @@ def zone_rows_to_articles(zones: list[dict], ref_col: str, lib_col: str,
     return articles
 
 
+def df_to_articles(df: pd.DataFrame, ref_col: str, lib_col: str,
+                   pa_col: str | None, pv_col: str | None,
+                   unite_col: str | None) -> list[dict]:
+    """
+    Convertit tout le DataFrame en dicts article (un seul lot, sans zone).
+    PA/PV pris HT. Unité telle quelle. code_sous_famille laissé vide (l'utilisateur
+    gère le reste). Mapping par nom de colonne ; colonne absente ou NONE_COL = ignorée.
+    """
+    cols = [str(c) for c in df.columns]
+
+    def cell(row, name):
+        return str(row.get(name, "")).strip() if (name and name != NONE_COL and name in cols) else ""
+
+    articles: list[dict] = []
+    for _, row in df.iterrows():
+        a = {
+            "reference":         cell(row, ref_col),
+            "nom_dessin":        cell(row, lib_col),
+            "prix_achat":        parse_price(cell(row, pa_col)) if pa_col and pa_col != NONE_COL else 0.0,
+            "prix_conseille":    parse_price(cell(row, pv_col)) if pv_col and pv_col != NONE_COL else 0.0,
+            "unite":             cell(row, unite_col),
+            "code_sous_famille": "",
+        }
+        if a["reference"] or a["nom_dessin"]:
+            articles.append(a)
+    return articles
+
+
 def csv_to_articles(df: pd.DataFrame, ref_col: str, lib_col: str,
                     prix_col: str | None, unite_col: str | None) -> list[dict]:
     """
