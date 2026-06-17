@@ -26,6 +26,8 @@ from core.zone_split import split_into_zones, realign_rows
 
 load_dotenv()
 
+ZONE_PREVIEW_N = 3  # lignes affichées par éditeur de zone (l'export garde tout)
+
 
 # ── Helpers communs ───────────────────────────────────────────────────────────
 
@@ -139,7 +141,13 @@ def run_zone_export(zones, edits, progress=gr.Progress()):
         lignes_rapport = ["═══ EXPORT DES ZONES ═══", f"Zones : {len(zones)}", ""]
 
         for z in zones:
-            rows = edits.get(z["index"], z["rows"])
+            # l'éditeur ne montre que les 3 premières lignes : on réinjecte les
+            # corrections sur ces lignes, le reste de la zone est exporté tel quel.
+            edited = edits.get(z["index"])
+            if edited is not None:
+                rows = list(edited) + z["rows"][len(edited):]
+            else:
+                rows = z["rows"]
             label = z["separateur"] or f"ZONE_{z['index']:02d}"
             fname = f"zone_{z['index']:02d}_{_safe_filename(label)}.csv"
             path = os.path.join(out_dir, fname)
@@ -223,9 +231,11 @@ with gr.Blocks(title="Atelier — Outils EBP", theme=gr.themes.Soft()) as demo:
                     return
                 for z in zones:
                     sep = z["separateur"] or "début de fichier"
-                    gr.Markdown(f"#### ✂️ Zone {z['index']:02d} — « {sep} » · {len(z['rows'])} ligne(s)")
+                    n = len(z["rows"])
+                    apercu = f" — aperçu {min(ZONE_PREVIEW_N, n)} ligne(s) sur {n} (l'export garde tout)" if n > ZONE_PREVIEW_N else ""
+                    gr.Markdown(f"#### ✂️ Zone {z['index']:02d} — « {sep} » · {n} ligne(s){apercu}")
                     tbl = gr.Dataframe(
-                        value=z["rows"],
+                        value=z["rows"][:ZONE_PREVIEW_N],
                         headers=z["header"],
                         col_count=(len(z["header"]), "fixed"),
                         type="array",
