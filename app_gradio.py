@@ -18,28 +18,9 @@ import gradio as gr
 from dotenv import load_dotenv
 
 from core.cleaner import clean_csv
-from core.csv_import import (
-    read_csv_df, guess_col, csv_to_articles, GUESS, NONE_COL,
-)
-from core.csv_writer import (
-    export_articles_par_famille, COLS_ARTICLES_EBP, _build_article_ebp_row,
-)
-from core.subfamily import analyse_sous_familles
+from core.zone_split import split_into_zones, write_zones
 
 load_dotenv()
-
-
-# ── Constantes ────────────────────────────────────────────────────────────────
-
-TVA_CHOICES = [("20 %", 20.0), ("10 %", 10.0), ("5,5 %", 5.5)]
-PREVIEW_N   = 10  # nombre de références montrées dans l'aperçu éditable
-
-
-def _resolve_tva(label: str) -> float:
-    for lab, val in TVA_CHOICES:
-        if lab == label:
-            return val
-    return 20.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -94,211 +75,63 @@ def run_clean(csv_file, drop_empty, drop_duplicates, trim_whitespace,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ONGLET 2 — CSV → CSV EBP (mapping + sous-familles)
+#  ONGLET 2 — Découpage en zones
 # ══════════════════════════════════════════════════════════════════════════════
 
-def on_csv_uploaded(csv_file):
-    """À l'upload : lit les colonnes réelles et pré-remplit les menus de mapping."""
-    empty = gr.update(choices=[], value=None)
-    empty_opt = gr.update(choices=[NONE_COL], value=NONE_COL)
-    if csv_file is None:
-        return empty, empty, empty_opt, empty_opt, ""
-    try:
-        df = read_csv_df(csv_file.name)
-    except Exception as exc:
-        return empty, empty, empty_opt, empty_opt, f"❌ Lecture impossible : {exc}"
-
-    cols = [str(c) for c in df.columns]
-    ref   = guess_col(cols, GUESS["reference"])
-    lib   = guess_col(cols, GUESS["libelle"])
-    prix  = guess_col(cols, GUESS["prix"])
-    unite = guess_col(cols, GUESS["unite"])
-
-    req = lambda v: gr.update(choices=cols, value=v or (cols[0] if cols else None))
-    opt = lambda v: gr.update(choices=[NONE_COL] + cols, value=v or NONE_COL)
-    info = f"{len(df)} ligne(s), {len(cols)} colonne(s) : {', '.join(cols[:8])}{'…' if len(cols) > 8 else ''}"
-    return req(ref), req(lib), opt(prix), opt(unite), info
-
-
-# ── Aperçu éditable ───────────────────────────────────────────────────────────
-
-def _articles_to_preview(articles, params, n) -> list[list[str]]:
-    rows = []
-    for a in articles[:n]:
-        r = _build_article_ebp_row(
-            a, params["fournisseur_code"], params["remise"],
-            "TVA20", params["taux_tva"], params["prix_sont_ttc"],
-        )
-        rows.append([r[c] for c in COLS_ARTICLES_EBP])
-    return rows
-
-
-def _apply_preview_edits(articles, edited_rows):
-    """
-    Réinjecte les corrections de l'aperçu (libellé, prix HT, unité, famille)
-    par appariement sur le « Code article ». Code article reste verrouillé.
-    """
-    if edited_rows is None:
-        return articles
-    rows = edited_rows.values.tolist() if hasattr(edited_rows, "values") else list(edited_rows)
-    idx = {c: i for i, c in enumerate(COLS_ARTICLES_EBP)}
-    by_ref: dict[str, dict] = {}
-    for a in articles:
-        ref = str(a.get("reference") or "").strip()
-        if ref and ref not in by_ref:
-            by_ref[ref] = a
-    for row in rows:
-        if not row or len(row) < len(COLS_ARTICLES_EBP):
-            continue
-        ref = str(row[idx["Code article"]]).strip()
-        a = by_ref.get(ref)
-        if a is None:
-            continue
-        a["nom_dessin"]        = str(row[idx["Libellé"]]).strip()
-        a["unite"]             = str(row[idx["Code unité"]]).strip()
-        a["code_sous_famille"] = str(row[idx["Code sous-famille article"]]).strip().upper()
-        pvht = str(row[idx["PV HT public conseillé"]]).replace(",", ".").strip()
-        try:
-            if pvht:
-                a["prix_conseille"] = float(pvht)
-        except ValueError:
-            pass
-    return articles
-
-
-# ── Export ────────────────────────────────────────────────────────────────────
-
-def _build_rapport(valides, rapport_familles, params) -> str:
+def _format_zone_report(rapport: dict) -> str:
+    sep_lbl = {"\t": "tabulation", ";": ";", ",": ",", "|": "|"}.get(
+        rapport.get("delimiteur", ";"), rapport.get("delimiteur", ";"))
     lines = [
-        "═══ RAPPORT CSV → EBP ═══",
-        f"Articles    : {len(valides)}",
-        f"Fournisseur : {params['fournisseur_code']}",
-        f"Remise      : {params['remise']} %",
+        "═══ DÉCOUPAGE EN ZONES ═══",
+        f"Séparateur de colonnes : {sep_lbl}",
+        f"Lignes lues : {rapport.get('lignes_totales', 0)}",
+        f"Zones créées : {rapport.get('nb_zones', 0)}",
+        "",
+        "Détail (renomme les fichiers à ta main) :",
     ]
-    if rapport_familles:
-        lines += [
-            "",
-            "── Analyse des sous-familles ──",
-            f"Total classé : {rapport_familles['total']}",
-            f"  par règles : {rapport_familles['par_regles']}",
-            f"  par LLM    : {rapport_familles['par_llm']}",
-            f"  par défaut : {rapport_familles['par_defaut']}",
-            "Répartition (1 CSV par famille) :",
-        ]
-        for fam, n in rapport_familles["repartition"].items():
-            lines.append(f"  • articles_{fam}.csv : {n} article(s)")
+    for z in rapport.get("zones", []):
+        sep = z["separateur"] or "(début de fichier)"
+        lines.append(f"  • zone_{z['index']:02d}.csv  ←  « {sep} »  ({z['lignes']} ligne(s))")
     return "\n".join(lines)
 
 
-def _do_csv_export(valides, rapport_familles, params) -> tuple[str, str]:
-    out_dir = tempfile.mkdtemp(prefix="ebp_csv_")
-
-    export_articles_par_famille(
-        articles=valides,
-        output_dir=out_dir,
-        fournisseur_code=params["fournisseur_code"],
-        remise=params["remise"],
-        taux_tva=params["taux_tva"],
-        prix_sont_ttc=params["prix_sont_ttc"],
-    )
-
-    # Fichier familles articles (codes distincts) — format écran EBP « Familles Articles »
-    familles = sorted({a.get("code_sous_famille", "DIVERS") for a in valides})
-    fam_path = os.path.join(out_dir, "0_familles_articles.csv")
-    with open(fam_path, "w", newline="", encoding="utf-8-sig") as f:
-        f.write("Code Famille Articles;Famille Articles\r\n")
-        for fam in familles:
-            f.write(f"{fam};{fam}\r\n")
-
-    rapport_txt = _build_rapport(valides, rapport_familles, params)
-    rapport_path = os.path.join(out_dir, "rapport.txt")
-    Path(rapport_path).write_text(rapport_txt, encoding="utf-8")
-
-    zip_path = os.path.join(out_dir, "export_ebp.zip")
-    with zipfile.ZipFile(zip_path, "w") as zf:
-        for fp in Path(out_dir).glob("*.csv"):
-            zf.write(fp, fp.name)
-        zf.write(rapport_path, "rapport.txt")
-    return zip_path, rapport_txt
+def _zones_to_preview(zones: list[dict]) -> list[list[str]]:
+    """Tableau récap des zones détectées : n° · séparateur · nb lignes."""
+    return [
+        [f"zone_{z['index']:02d}.csv", z["separateur"] or "(début de fichier)", str(len(z["rows"]))]
+        for z in zones
+    ]
 
 
-# ── Callbacks principaux ──────────────────────────────────────────────────────
-
-def run_csv_preview(csv_file, ref_col, lib_col, prix_col, unite_col,
-                    fournisseur_code, remise, taux_tva_label, prix_sont_ttc,
-                    analyse_familles, classif_llm, progress=gr.Progress()):
+def run_zone_split(csv_file, progress=gr.Progress()):
     if csv_file is None:
-        return None, gr.update(visible=False), "⚠️ Aucun fichier CSV fourni."
-    if not ref_col or not lib_col:
-        return None, gr.update(visible=False), "⚠️ Choisis au moins les colonnes Référence et Libellé."
-
-    fournisseur_code = (fournisseur_code or "").strip().upper() or "FOUR001"
-    params = {
-        "fournisseur_code": fournisseur_code,
-        "remise":           float(remise),
-        "taux_tva":         _resolve_tva(taux_tva_label),
-        "prix_sont_ttc":    bool(prix_sont_ttc),
-        "analyse_familles": bool(analyse_familles),
-    }
-
+        return None, gr.update(value=None, visible=False), "⚠️ Aucun fichier CSV fourni."
     try:
         progress(0.2, desc="Lecture du CSV…")
-        df = read_csv_df(csv_file.name)
-        articles = csv_to_articles(df, ref_col, lib_col, prix_col, unite_col)
-        if not articles:
-            return None, gr.update(visible=False), "⚠️ Aucune ligne exploitable dans ce CSV."
+        zones, rapport = split_into_zones(csv_file.name)
+        if not zones:
+            return None, gr.update(value=None, visible=False), "⚠️ Aucune zone détectée dans ce CSV."
 
-        rapport_familles = None
-        if analyse_familles:
-            progress(0.5, desc="Analyse des sous-familles…")
-            client = None
-            if classif_llm:
-                import anthropic
-                try:
-                    client = anthropic.Anthropic()
-                except Exception:
-                    client = None
-            articles, rapport_familles = analyse_sous_familles(
-                articles, use_llm=classif_llm and client is not None, client=client,
-            )
+        progress(0.6, desc="Écriture des zones…")
+        out_dir = tempfile.mkdtemp(prefix="zones_")
+        files = write_zones(zones, out_dir)
 
-        preview_rows = _articles_to_preview(articles, params, PREVIEW_N)
-        state = {"valides": articles, "rapport_familles": rapport_familles, "params": params}
-        info = (f"Aperçu de {min(PREVIEW_N, len(articles))} réf. sur {len(articles)}. "
-                "Corrige le tableau (famille, libellé, prix HT, unité) puis « Exporter ». "
-                "L'unité de chaque ligne est laissée telle quelle.")
-        progress(1.0, desc="Aperçu prêt")
-        return state, gr.update(value=preview_rows, visible=True), info
-    except Exception as exc:
-        tb = traceback.format_exc()
-        return None, gr.update(visible=False), f"❌ Erreur : {exc}\n\n{tb[-600:]}"
+        rapport_txt = _format_zone_report(rapport)
+        rapport_path = os.path.join(out_dir, "rapport_zones.txt")
+        Path(rapport_path).write_text(rapport_txt, encoding="utf-8")
 
+        zip_path = os.path.join(out_dir, "zones.zip")
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            for name, path in files.items():
+                zf.write(path, name)
+            zf.write(rapport_path, "rapport_zones.txt")
 
-def run_csv_export(state, edited_rows, progress=gr.Progress()):
-    if not state:
-        return None, "⚠️ Lance d'abord « Analyser & aperçu »."
-    try:
-        progress(0.3, desc="Application des corrections…")
-        valides = _apply_preview_edits(state["valides"], edited_rows)
-        params = state["params"]
-
-        rapport_familles = state.get("rapport_familles")
-        if params["analyse_familles"]:
-            repart: dict[str, int] = {}
-            for a in valides:
-                fam = a.get("code_sous_famille", "DIVERS")
-                repart[fam] = repart.get(fam, 0) + 1
-            if rapport_familles:
-                rapport_familles = dict(rapport_familles)
-                rapport_familles["repartition"] = dict(sorted(repart.items(), key=lambda kv: -kv[1]))
-
-        progress(0.6, desc="Écriture des CSV par famille…")
-        zip_path, rapport_txt = _do_csv_export(valides, rapport_familles, params)
         progress(1.0, desc="Terminé !")
-        return zip_path, rapport_txt
+        recap = _zones_to_preview(zones)
+        return zip_path, gr.update(value=recap, visible=True), rapport_txt
     except Exception as exc:
         tb = traceback.format_exc()
-        return None, f"❌ Erreur : {exc}\n\n{tb[-600:]}"
+        return None, gr.update(value=None, visible=False), f"❌ Erreur : {exc}\n\n{tb[-600:]}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -336,53 +169,31 @@ with gr.Blocks(title="Atelier — Outils EBP", theme=gr.themes.Soft()) as demo:
                     clean_report_out = gr.Textbox(label="📊 Rapport de nettoyage",
                                                   lines=16, interactive=False)
 
-        # ══════════ ONGLET 2 : CSV → CSV EBP ══════════
-        with gr.Tab("📄 CSV → CSV EBP (sous-familles)"):
+        # ══════════ ONGLET 2 : Découpage en zones ══════════
+        with gr.Tab("✂️ Découper en zones"):
             gr.Markdown(
-                "Charge un CSV fournisseur, **mappe ses colonnes**, et obtiens un export EBP "
-                "**1 fichier CSV par famille** (TAPISSERIE · RIDEAU · MOUSSE · SELLERIE). "
-                "Les unités sont reprises telles quelles, ligne par ligne."
+                "Charge un CSV : à **chaque séparation** (ligne vide) ou **décalage de "
+                "données** (titre de section qui change la structure des colonnes), le "
+                "fichier est **coupé** et tout ce qui suit part dans un nouveau CSV. "
+                "Les fichiers sortent numérotés (`zone_01.csv`…) — tu leur donnes "
+                "l'intitulé toi-même. Les valeurs sont reprises telles quelles."
             )
             with gr.Row():
-                with gr.Column(scale=2):
-                    csv_in = gr.File(label="CSV fournisseur", file_types=[".csv", ".tsv", ".txt"])
-                    map_info = gr.Textbox(label="Colonnes détectées", interactive=False, lines=1)
-                    gr.Markdown("**Mapping des colonnes** (rempli automatiquement, ajuste si besoin)")
-                    col_ref   = gr.Dropdown(label="Colonne Référence (Code article) *", choices=[])
-                    col_lib   = gr.Dropdown(label="Colonne Libellé (sert à classer la famille) *", choices=[])
-                    col_prix  = gr.Dropdown(label="Colonne Prix HT conseillé", choices=[NONE_COL], value=NONE_COL)
-                    col_unite = gr.Dropdown(label="Colonne Unité (laissée telle quelle)", choices=[NONE_COL], value=NONE_COL)
-
                 with gr.Column(scale=1):
-                    gr.Markdown("### 🏭 Paramètres EBP")
-                    csv_fourn_code = gr.Textbox(label="Code fournisseur", placeholder="Ex : CAS001")
-                    csv_remise     = gr.Slider(0, 80, value=45, step=1, label="Remise fournisseur (%)")
-                    csv_prix_ttc   = gr.Checkbox(label="Les prix du CSV sont TTC", value=False)
-                    csv_taux_tva   = gr.Radio([l for l, _ in TVA_CHOICES], value="20 %", label="Taux TVA")
-                    csv_analyse    = gr.Checkbox(label="Analyse des sous-familles (export par famille)", value=True)
-                    csv_classif    = gr.Checkbox(label="Affiner les cas ambigus avec Claude", value=True)
-
-            with gr.Row():
-                btn_csv_preview = gr.Button("👁️ Analyser & aperçu (10 réf.)", variant="secondary", size="lg")
-
-            csv_preview_info = gr.Textbox(label="Aperçu", interactive=False, lines=2)
-            csv_preview_table = gr.Dataframe(
-                headers=COLS_ARTICLES_EBP,
-                datatype=["str"] * len(COLS_ARTICLES_EBP),
-                col_count=(len(COLS_ARTICLES_EBP), "fixed"),
-                type="pandas",
-                interactive=True,
-                static_columns=[0],  # « Code article » verrouillé (clé d'appariement)
-                wrap=True,
-                visible=False,
-                label="Échantillon — colonnes éditables, sauf « Code article »",
-            )
-            btn_csv_export = gr.Button("📦 Exporter par famille", variant="primary", size="lg")
-            csv_state = gr.State()
-
-            with gr.Row():
-                csv_zip    = gr.File(label="📦 Télécharger les CSV EBP (ZIP)")
-                csv_report = gr.Textbox(label="📊 Rapport", lines=16, interactive=False)
+                    zone_in = gr.File(label="CSV à découper", file_types=[".csv", ".tsv", ".txt"])
+                    btn_zone = gr.Button("✂️ Découper en zones", variant="primary", size="lg")
+                    zone_zip = gr.File(label="📦 Télécharger les zones (ZIP)")
+                with gr.Column(scale=2):
+                    zone_table = gr.Dataframe(
+                        headers=["Fichier", "Séparateur détecté", "Lignes"],
+                        datatype=["str", "str", "str"],
+                        col_count=(3, "fixed"),
+                        interactive=False,
+                        wrap=True,
+                        visible=False,
+                        label="Zones détectées",
+                    )
+                    zone_report = gr.Textbox(label="📊 Rapport de découpage", lines=14, interactive=False)
 
     # ── Événements ────────────────────────────────────────────────────────────
     btn_clean.click(
@@ -392,24 +203,10 @@ with gr.Blocks(title="Atelier — Outils EBP", theme=gr.themes.Soft()) as demo:
         outputs=[clean_file_out, clean_report_out],
     )
 
-    csv_in.change(
-        fn=on_csv_uploaded,
-        inputs=[csv_in],
-        outputs=[col_ref, col_lib, col_prix, col_unite, map_info],
-    )
-
-    btn_csv_preview.click(
-        fn=run_csv_preview,
-        inputs=[csv_in, col_ref, col_lib, col_prix, col_unite,
-                csv_fourn_code, csv_remise, csv_taux_tva, csv_prix_ttc,
-                csv_analyse, csv_classif],
-        outputs=[csv_state, csv_preview_table, csv_preview_info],
-    )
-
-    btn_csv_export.click(
-        fn=run_csv_export,
-        inputs=[csv_state, csv_preview_table],
-        outputs=[csv_zip, csv_report],
+    btn_zone.click(
+        fn=run_zone_split,
+        inputs=[zone_in],
+        outputs=[zone_zip, zone_table, zone_report],
     )
 
 

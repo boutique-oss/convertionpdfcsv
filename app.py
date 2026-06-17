@@ -3,7 +3,7 @@ Point d'entrée du Space : FastAPI minimal + UI Gradio à onglets servie sur /.
 
 Une seule page, deux onglets :
   - 🧹 Nettoyeur CSV     (core.cleaner — 100 % local, sans IA)
-  - 📄 CSV → CSV EBP     (core.subfamily — mapping colonnes + analyse sous-familles + aperçu éditable)
+  - ✂️ Découper en zones (core.zone_split — coupe à chaque séparation / décalage)
 
 Lancement (Docker) : uvicorn app:app --host 0.0.0.0 --port 7860
 """
