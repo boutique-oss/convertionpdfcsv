@@ -236,7 +236,6 @@ def _build_article_ebp_row(
     a: dict,
     fournisseur_code: str,
     remise: float,
-    unite_defaut: str,
     code_tva: str,
     taux_tva: float,
     prix_sont_ttc: bool,
@@ -244,7 +243,9 @@ def _build_article_ebp_row(
     """Construit une ligne au format écran « Articles » EBP."""
     ref        = str(a.get("reference") or a.get("code") or "").strip()
     libelle    = _truncate(a.get("nom_dessin") or a.get("libelle") or "", 80)
-    unite_art  = str(a.get("unite") or unite_defaut).strip()
+    # Unité prise telle quelle dans la source, jamais imposée ni uniformisée.
+    # Chaque référence garde sa propre unité ; vide si la source n'en donne pas.
+    unite_art  = str(a.get("unite") or "").strip()
     remise_art = float(a.get("remise_specifique") or remise)
     famille    = str(a.get("code_sous_famille") or "").strip()
 
@@ -275,7 +276,6 @@ def export_articles_par_famille(
     output_dir: str,
     fournisseur_code: str,
     remise: float = 45.0,
-    unite_defaut: str = "ml",
     code_tva: str = "TVA20",
     taux_tva: float = 20.0,
     prix_sont_ttc: bool = False,
@@ -300,7 +300,7 @@ def export_articles_par_famille(
     for famille in sorted(groupes):
         rows = [
             _build_article_ebp_row(
-                a, fournisseur_code, remise, unite_defaut,
+                a, fournisseur_code, remise,
                 code_tva, taux_tva, prix_sont_ttc,
             )
             for a in groupes[famille]
