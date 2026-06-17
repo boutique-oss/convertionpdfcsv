@@ -53,6 +53,7 @@ async def clean(
     drop_duplicates: bool = Form(True),
     trim_whitespace: bool = Form(True),
     normalize_headers: bool = Form(True),
+    keep_digits_only: bool = Form(False),
     decimal_comma: bool = Form(False),
     ebp_format: bool = Form(False),
 ):
@@ -81,6 +82,7 @@ async def clean(
         "drop_duplicates": drop_duplicates,
         "trim_whitespace": trim_whitespace,
         "normalize_headers": normalize_headers,
+        "keep_digits_only": keep_digits_only,
         "decimal_comma": decimal_comma,
         "ebp_format": ebp_format,
     }

@@ -82,6 +82,19 @@ def _looks_numeric(value: str) -> bool:
     return bool(_NUM_RE.match(value)) and any(c.isdigit() for c in value)
 
 
+def _strip_to_digits(value: str) -> str:
+    """
+    Retire lettres, symboles et espaces, ne garde que les chiffres et les
+    séparateurs décimaux (, . -). Ex. : "12,50€" → "12,50", "A123" → "123",
+    "10 ml" → "10". Les cellules sans aucun chiffre sont laissées intactes.
+    """
+    if not any(c.isdigit() for c in value):
+        return value
+    core = re.sub(r"[^\d.,\-]", "", value)
+    core = core.strip(".,")          # retire d'éventuels séparateurs en bord
+    return core if any(c.isdigit() for c in core) else value
+
+
 def _to_decimal_comma(value: str) -> str:
     """Normalise un nombre vers la virgule décimale française, sans séparateur de milliers."""
     v = value.strip().replace(" ", " ")
@@ -185,6 +198,23 @@ def clean_csv(raw: bytes, options: dict) -> tuple[bytes, dict]:
         removed = before - len(df)
         if removed:
             log(f"{removed} ligne(s) en double supprimée(s).")
+
+    # 4b. Garder uniquement les chiffres (retire lettres/symboles des montants)
+    if options.get("keep_digits_only"):
+        stripped = 0
+
+        def strip_cell(x):
+            nonlocal stripped
+            if isinstance(x, str):
+                new = _strip_to_digits(x)
+                if new != x:
+                    stripped += 1
+                return new
+            return x
+
+        df = df.apply(lambda col: col.map(strip_cell))
+        if stripped:
+            log(f"{stripped} cellule(s) nettoyée(s) : lettres et symboles retirés.")
 
     # 5. Décimales en virgule française
     if options.get("decimal_comma"):

@@ -4,7 +4,8 @@ from core.cleaner import clean_csv, detect_delimiter, detect_encoding
 
 def _opts(**over):
     base = dict(drop_empty=False, drop_duplicates=False, trim_whitespace=False,
-                normalize_headers=False, decimal_comma=False, ebp_format=False)
+                normalize_headers=False, keep_digits_only=False,
+                decimal_comma=False, ebp_format=False)
     base.update(over)
     return base
 
@@ -73,6 +74,26 @@ def test_ebp_format_output():
     assert rep["separateur_sortie"] == ";"
     assert out.startswith(b"\xef\xbb\xbf")  # BOM utf-8-sig
     assert b"\r\n" in out
+
+
+def test_keep_digits_only_strips_letters_symbols():
+    raw = "p\n12,50€\nA123\n10 ml\n€99.90\n".encode("utf-8")
+    out, _ = clean_csv(raw, _opts(keep_digits_only=True))
+    body = out.decode("utf-8-sig").splitlines()[1:]
+    assert body == ["12,50", "123", "10", "99.90"]
+
+
+def test_keep_digits_only_leaves_pure_text():
+    raw = "nom\nCHOREGRAPHIE\nVELOURS\n".encode("utf-8")
+    out, _ = clean_csv(raw, _opts(keep_digits_only=True))
+    body = out.decode("utf-8-sig").splitlines()[1:]
+    assert body == ["CHOREGRAPHIE", "VELOURS"]
+
+
+def test_keep_digits_then_decimal_comma():
+    raw = "prix\n12.50€\n".encode("utf-8")
+    out, _ = clean_csv(raw, _opts(keep_digits_only=True, decimal_comma=True))
+    assert out.decode("utf-8-sig").splitlines()[1] == "12,50"
 
 
 def test_no_options_reports_clean():
