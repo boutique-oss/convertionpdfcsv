@@ -18,6 +18,8 @@ import gradio as gr
 from dotenv import load_dotenv
 
 from core.cleaner import clean_csv
+from core.csv_import import read_csv_df, guess_col, NONE_COL
+from core.marge import compute_marges, GUESS_PA, GUESS_PV, COL_MARGE
 from core.zone_split import split_into_zones, write_zones
 
 load_dotenv()
@@ -135,6 +137,65 @@ def run_zone_split(csv_file, progress=gr.Progress()):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  ONGLET 3 — Taux de marge
+# ══════════════════════════════════════════════════════════════════════════════
+
+def on_marge_uploaded(csv_file):
+    """À l'upload : pré-remplit les menus prix d'achat / prix de vente."""
+    empty = gr.update(choices=[], value=None)
+    if csv_file is None:
+        return empty, empty, ""
+    try:
+        df = read_csv_df(csv_file.name)
+    except Exception as exc:
+        return empty, empty, f"❌ Lecture impossible : {exc}"
+    cols = [str(c) for c in df.columns]
+    pa = guess_col(cols, GUESS_PA)
+    pv = guess_col(cols, GUESS_PV)
+    mk = lambda v: gr.update(choices=cols, value=v or (cols[0] if cols else None))
+    info = f"{len(df)} ligne(s), {len(cols)} colonne(s) : {', '.join(cols[:8])}{'…' if len(cols) > 8 else ''}"
+    return mk(pa), mk(pv), info
+
+
+def _format_marge_report(rapport: dict) -> str:
+    moy = rapport["moyenne"]
+    lines = [
+        "═══ TAUX DE MARGE ═══",
+        "Formule : (PV − PA) / PV × 100",
+        f"Lignes traitées : {rapport['lignes']}",
+        f"Marges calculées : {rapport['calculees']}",
+        f"Moyenne : {moy:.2f} %".replace(".", ",") if moy is not None else "Moyenne : —",
+        f"Min / Max : {rapport['mini']} % / {rapport['maxi']} %",
+    ]
+    if rapport["pv_nul"]:
+        lines.append(f"⚠️ {rapport['pv_nul']} ligne(s) sans prix de vente (marge vide).")
+    if rapport["marge_negative"]:
+        lines.append(f"⚠️ {rapport['marge_negative']} ligne(s) à marge NÉGATIVE (PV < PA).")
+    return "\n".join(lines)
+
+
+def run_marge(csv_file, pa_col, pv_col):
+    if csv_file is None:
+        return None, "⚠️ Aucun fichier CSV fourni."
+    if not pa_col or not pv_col:
+        return None, "⚠️ Choisis la colonne prix d'achat ET la colonne prix de vente."
+    if pa_col == pv_col:
+        return None, "⚠️ Prix d'achat et prix de vente doivent être deux colonnes différentes."
+    try:
+        df = read_csv_df(csv_file.name)
+        out_df, rapport = compute_marges(df, pa_col, pv_col)
+    except Exception as exc:
+        tb = traceback.format_exc()
+        return None, f"❌ Erreur : {exc}\n\n{tb[-500:]}"
+
+    base = Path(csv_file.name).stem or "fichier"
+    out_dir = tempfile.mkdtemp(prefix="marge_")
+    out_path = os.path.join(out_dir, f"{base}_marge.csv")
+    out_df.to_csv(out_path, sep=";", index=False, encoding="utf-8-sig", lineterminator="\r\n")
+    return out_path, _format_marge_report(rapport)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  Interface
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -195,6 +256,25 @@ with gr.Blocks(title="Atelier — Outils EBP", theme=gr.themes.Soft()) as demo:
                     )
                     zone_report = gr.Textbox(label="📊 Rapport de découpage", lines=14, interactive=False)
 
+        # ══════════ ONGLET 3 : Taux de marge ══════════
+        with gr.Tab("📈 Taux de marge"):
+            gr.Markdown(
+                "Charge un CSV avec un **prix d'achat** et un **prix de vente** (HT). "
+                "Je calcule le **taux de marge = (PV − PA) / PV × 100** ligne par ligne "
+                "et j'ajoute la colonne « Taux de marge ». Aucune remise à saisir."
+            )
+            with gr.Row():
+                with gr.Column(scale=1):
+                    marge_in = gr.File(label="CSV (prix achat + prix vente)",
+                                       file_types=[".csv", ".tsv", ".txt"])
+                    marge_info = gr.Textbox(label="Colonnes détectées", interactive=False, lines=1)
+                    marge_pa = gr.Dropdown(label="Colonne Prix d'achat (PA) *", choices=[])
+                    marge_pv = gr.Dropdown(label="Colonne Prix de vente (PV) *", choices=[])
+                    btn_marge = gr.Button("📈 Calculer le taux de marge", variant="primary", size="lg")
+                with gr.Column(scale=1):
+                    marge_out    = gr.File(label="📥 CSV avec colonne « Taux de marge »")
+                    marge_report = gr.Textbox(label="📊 Rapport", lines=12, interactive=False)
+
     # ── Événements ────────────────────────────────────────────────────────────
     btn_clean.click(
         fn=run_clean,
@@ -207,6 +287,18 @@ with gr.Blocks(title="Atelier — Outils EBP", theme=gr.themes.Soft()) as demo:
         fn=run_zone_split,
         inputs=[zone_in],
         outputs=[zone_zip, zone_table, zone_report],
+    )
+
+    marge_in.change(
+        fn=on_marge_uploaded,
+        inputs=[marge_in],
+        outputs=[marge_pa, marge_pv, marge_info],
+    )
+
+    btn_marge.click(
+        fn=run_marge,
+        inputs=[marge_in, marge_pa, marge_pv],
+        outputs=[marge_out, marge_report],
     )
 
 
