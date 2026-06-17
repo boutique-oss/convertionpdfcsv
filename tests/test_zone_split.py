@@ -3,7 +3,29 @@ import csv
 import os
 import tempfile
 
-from core.zone_split import split_into_zones, write_zones, is_separator
+from core.zone_split import split_into_zones, write_zones, is_separator, realign_rows
+
+
+# ── Réalignement ──────────────────────────────────────────────────────────────
+
+def test_realign_non_destructif():
+    # 1 ligne décalée à 5 cellules → largeur commune = 5, aucune donnée perdue
+    rows = [["a", "b", "c", "d"], ["e", "f", "g", "h"],
+            ["i", "j", "k", "l", "m"], ["n", "o", "p", "q"]]
+    header, norm = realign_rows(rows, ["C1", "C2", "C3", "C4"])
+    assert len(header) == 5
+    assert all(len(r) == 5 for r in norm)
+    assert norm[2] == ["i", "j", "k", "l", "m"]   # le 5e champ est conservé
+    assert norm[0] == ["a", "b", "c", "d", ""]    # ligne courte complétée
+
+def test_realign_pad_lignes_courtes():
+    rows = [["a", "b", "c"], ["d", "e", "c"], ["f", "g"]]
+    header, norm = realign_rows(rows, ["X", "Y", "Z"])
+    assert norm[2] == ["f", "g", ""]         # ligne courte complétée
+
+def test_realign_header_non_vide_unique():
+    header, _ = realign_rows([["a", "b"]], ["", ""])
+    assert header == ["Col1", "Col2"]
 
 
 SAMPLE = (
@@ -32,8 +54,10 @@ def test_is_separator_blank():
 def test_is_separator_titre_une_cellule():
     assert is_separator(["VELOURS"], 4) is True
 
-def test_is_separator_decalage_colonnes():
-    assert is_separator(["a", "b"], 4) is True
+def test_is_separator_decalage_nest_pas_une_rupture():
+    # un simple écart de colonnes = ligne de données à réaligner, pas une rupture
+    assert is_separator(["a", "b"], 4) is False
+    assert is_separator(["B2", "Voile", "extra", "30", "M"], 4) is False
 
 def test_is_separator_ligne_data_normale():
     assert is_separator(["A1", "Article", "10", "ml"], 4) is False

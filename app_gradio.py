@@ -1,46 +1,43 @@
 """
 Interface Gradio — Atelier EBP, page unique à deux onglets :
-  - 🧹 Nettoyeur CSV         (core.cleaner — 100 % local, sans IA)
-  - 📄 CSV → EBP par zone    (mapping colonnes + découpage par zone + colonnes EBP
-                              + colonne Taux de marge + aperçu éditable + export ZIP)
+  - 🧹 Nettoyeur CSV       (core.cleaner — 100 % local, sans IA)
+  - ✂️ Zones éditables     (découpage par zone + 1 éditeur par zone, réalignement
+                            auto, export ZIP). Pas de mapping de colonnes en amont :
+                            les colonnes ne se voient/s'éditent que dans l'éditeur.
 
-L'entrée est toujours un CSV. Le regroupement se fait par ZONE (séparateur /
-décalage dans le CSV), pas par sous-famille. Les unités sont reprises telles quelles.
 Lancer en local : python app_gradio.py
 """
 from __future__ import annotations
 
+import csv as _csv
 import os
 import tempfile
 import traceback
 import zipfile
+from functools import partial
 from pathlib import Path
 
 import gradio as gr
 from dotenv import load_dotenv
 
 from core.cleaner import clean_csv
-from core.csv_import import read_csv_df, guess_col, zone_rows_to_articles, GUESS, NONE_COL
-from core.csv_writer import (
-    export_articles_par_zone, build_ebp_row_marge, COLS_ARTICLES_EBP_MARGE,
-)
-from core.marge import GUESS_PA, GUESS_PV
-from core.zone_split import split_into_zones
+from core.csv_writer import _safe_filename
+from core.zone_split import split_into_zones, realign_rows
 
 load_dotenv()
 
 
-# ── Constantes ────────────────────────────────────────────────────────────────
+# ── Helpers communs ───────────────────────────────────────────────────────────
 
-TVA_CHOICES = [("20 %", 20.0), ("10 %", 10.0), ("5,5 %", 5.5)]
-PREVIEW_N   = 10
-
-
-def _resolve_tva(label: str) -> float:
-    for lab, val in TVA_CHOICES:
-        if lab == label:
-            return val
-    return 20.0
+def _coerce_rows(data) -> list[list[str]]:
+    """Normalise la valeur d'un Dataframe Gradio en liste de listes de str."""
+    if data is None:
+        return []
+    if hasattr(data, "values"):       # pandas DataFrame
+        data = data.values.tolist()
+    elif hasattr(data, "tolist"):     # numpy array
+        data = data.tolist()
+    return [[("" if c is None else str(c)) for c in row] for row in data]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -95,173 +92,73 @@ def run_clean(csv_file, drop_empty, drop_duplicates, trim_whitespace,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ONGLET 2 — CSV → EBP par zone
+#  ONGLET 2 — Zones éditables (1 éditeur par zone, réalignement auto)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def on_csv_uploaded(csv_file):
-    """À l'upload : lit les colonnes réelles et pré-remplit les menus de mapping."""
-    empty = gr.update(choices=[], value=None)
-    empty_opt = gr.update(choices=[NONE_COL], value=NONE_COL)
+def prepare_zones(csv_file):
+    """
+    Découpe le CSV en zones et réaligne chaque zone à sa largeur la plus logique.
+    Retourne (zones, info, edits_reset).
+    zones = [{"index", "separateur", "header", "rows"}].
+    """
     if csv_file is None:
-        return empty, empty, empty_opt, empty_opt, empty_opt, ""
+        return [], "", {}
     try:
-        df = read_csv_df(csv_file.name)
+        raw_zones, zrap = split_into_zones(csv_file.name)
     except Exception as exc:
-        return empty, empty, empty_opt, empty_opt, empty_opt, f"❌ Lecture impossible : {exc}"
+        return [], f"❌ Lecture impossible : {exc}", {}
+    if not raw_zones:
+        return [], "⚠️ Aucune zone détectée dans ce CSV.", {}
 
-    cols = [str(c) for c in df.columns]
-    ref   = guess_col(cols, GUESS["reference"])
-    lib   = guess_col(cols, GUESS["libelle"])
-    pa    = guess_col(cols, GUESS_PA)
-    pv    = guess_col(cols, GUESS_PV)
-    unite = guess_col(cols, GUESS["unite"])
-
-    req = lambda v: gr.update(choices=cols, value=v or (cols[0] if cols else None))
-    opt = lambda v: gr.update(choices=[NONE_COL] + cols, value=v or NONE_COL)
-    info = f"{len(df)} ligne(s), {len(cols)} colonne(s) : {', '.join(cols[:8])}{'…' if len(cols) > 8 else ''}"
-    return req(ref), req(lib), opt(pa), opt(pv), opt(unite), info
-
-
-# ── Aperçu éditable ───────────────────────────────────────────────────────────
-
-def _articles_to_preview(articles, params, n) -> list[list[str]]:
-    rows = []
-    for a in articles[:n]:
-        r = build_ebp_row_marge(a, params["fournisseur_code"], params["taux_tva"])
-        rows.append([r[c] for c in COLS_ARTICLES_EBP_MARGE])
-    return rows
+    zones = []
+    for z in raw_zones:
+        header, rows = realign_rows(z["rows"], z["header"])
+        zones.append({
+            "index": z["index"], "separateur": z["separateur"],
+            "header": header, "rows": rows,
+        })
+    info = (f"{zrap['nb_zones']} zone(s) détectée(s) et réalignée(s). "
+            "Édite chaque zone ci-dessous, puis « Exporter ». Tu nommes les fichiers à ta main.")
+    return zones, info, {}
 
 
-def _apply_preview_edits(articles, edited_rows):
-    """
-    Réinjecte les corrections de l'aperçu (libellé, PV, PA, unité, zone) par
-    appariement sur le « Code article » (verrouillé). Le taux de marge est
-    recalculé à l'export depuis PV/PA.
-    """
-    if edited_rows is None:
-        return articles
-    rows = edited_rows.values.tolist() if hasattr(edited_rows, "values") else list(edited_rows)
-    idx = {c: i for i, c in enumerate(COLS_ARTICLES_EBP_MARGE)}
-    by_ref: dict[str, dict] = {}
-    for a in articles:
-        ref = str(a.get("reference") or "").strip()
-        if ref and ref not in by_ref:
-            by_ref[ref] = a
-
-    def _num(v):
-        s = str(v).replace(",", ".").strip()
-        try:
-            return float(s) if s else None
-        except ValueError:
-            return None
-
-    for row in rows:
-        if not row or len(row) < len(COLS_ARTICLES_EBP_MARGE):
-            continue
-        a = by_ref.get(str(row[idx["Code article"]]).strip())
-        if a is None:
-            continue
-        a["nom_dessin"]        = str(row[idx["Libellé"]]).strip()
-        a["unite"]             = str(row[idx["Code unité"]]).strip()
-        a["code_sous_famille"] = str(row[idx["Code sous-famille article"]]).strip()
-        pv = _num(row[idx["PV HT public conseillé"]])
-        pa = _num(row[idx["Prix d'achat"]])
-        if pv is not None:
-            a["prix_conseille"] = pv
-        if pa is not None:
-            a["prix_achat"] = pa
-    return articles
+def save_zone_edit(index, data, edits):
+    """Mémorise les lignes éditées d'une zone (par index) dans l'état edits."""
+    edits = dict(edits or {})
+    edits[index] = _coerce_rows(data)
+    return edits
 
 
-# ── Export ────────────────────────────────────────────────────────────────────
+def run_zone_export(zones, edits, progress=gr.Progress()):
+    if not zones:
+        return None, "⚠️ Charge d'abord un CSV pour générer les zones."
+    edits = edits or {}
+    try:
+        progress(0.3, desc="Écriture des zones…")
+        out_dir = tempfile.mkdtemp(prefix="zones_")
+        lignes_rapport = ["═══ EXPORT DES ZONES ═══", f"Zones : {len(zones)}", ""]
 
-def _build_rapport(articles, params) -> str:
-    from collections import defaultdict
-    par_zone: dict[str, int] = defaultdict(int)
-    for a in articles:
-        par_zone[a.get("code_sous_famille", "ZONE")] += 1
-    lines = [
-        "═══ RAPPORT CSV → EBP (par zone) ═══",
-        f"Articles    : {len(articles)}",
-        f"Fournisseur : {params['fournisseur_code']}",
-        f"Zones       : {len(par_zone)}",
-        "",
-        "Répartition (1 CSV par zone, renomme à ta main si besoin) :",
-    ]
-    for i, (zone, n) in enumerate(sorted(par_zone.items()), 1):
-        lines.append(f"  • zone_{i:02d}_{zone} : {n} article(s)")
-    return "\n".join(lines)
-
-
-def _do_export(articles, params) -> tuple[str, str]:
-    out_dir = tempfile.mkdtemp(prefix="ebp_zone_")
-    export_articles_par_zone(
-        articles=articles,
-        output_dir=out_dir,
-        fournisseur_code=params["fournisseur_code"],
-        taux_tva=params["taux_tva"],
-    )
-
-    # Familles articles (zones distinctes) — format écran EBP « Familles Articles »
-    zones = sorted({a.get("code_sous_famille", "ZONE") for a in articles})
-    fam_path = os.path.join(out_dir, "0_familles_articles.csv")
-    with open(fam_path, "w", newline="", encoding="utf-8-sig") as f:
-        f.write("Code Famille Articles;Famille Articles\r\n")
         for z in zones:
-            f.write(f"{z};{z}\r\n")
+            rows = edits.get(z["index"], z["rows"])
+            label = z["separateur"] or f"ZONE_{z['index']:02d}"
+            fname = f"zone_{z['index']:02d}_{_safe_filename(label)}.csv"
+            path = os.path.join(out_dir, fname)
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                w = _csv.writer(f, delimiter=";", lineterminator="\r\n")
+                w.writerow(z["header"])
+                w.writerows(rows)
+            lignes_rapport.append(f"  • {fname} : {len(rows)} ligne(s)")
 
-    rapport_txt = _build_rapport(articles, params)
-    rapport_path = os.path.join(out_dir, "rapport.txt")
-    Path(rapport_path).write_text(rapport_txt, encoding="utf-8")
+        rapport_txt = "\n".join(lignes_rapport)
+        rapport_path = os.path.join(out_dir, "rapport.txt")
+        Path(rapport_path).write_text(rapport_txt, encoding="utf-8")
 
-    zip_path = os.path.join(out_dir, "export_ebp.zip")
-    with zipfile.ZipFile(zip_path, "w") as zf:
-        for fp in Path(out_dir).glob("*.csv"):
-            zf.write(fp, fp.name)
-        zf.write(rapport_path, "rapport.txt")
-    return zip_path, rapport_txt
+        zip_path = os.path.join(out_dir, "zones.zip")
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            for fp in Path(out_dir).glob("*.csv"):
+                zf.write(fp, fp.name)
+            zf.write(rapport_path, "rapport.txt")
 
-
-# ── Callbacks principaux ──────────────────────────────────────────────────────
-
-def run_csv_preview(csv_file, ref_col, lib_col, pa_col, pv_col, unite_col,
-                    fournisseur_code, taux_tva_label, progress=gr.Progress()):
-    if csv_file is None:
-        return None, gr.update(visible=False), "⚠️ Aucun fichier CSV fourni."
-    if not ref_col or not lib_col:
-        return None, gr.update(visible=False), "⚠️ Choisis au moins les colonnes Référence et Libellé."
-
-    params = {
-        "fournisseur_code": (fournisseur_code or "").strip().upper() or "FOUR001",
-        "taux_tva":         _resolve_tva(taux_tva_label),
-    }
-    try:
-        progress(0.3, desc="Lecture + découpage en zones…")
-        zones, zrap = split_into_zones(csv_file.name)
-        articles = zone_rows_to_articles(zones, ref_col, lib_col, pa_col, pv_col, unite_col)
-        if not articles:
-            return None, gr.update(visible=False), "⚠️ Aucune ligne exploitable dans ce CSV."
-
-        preview_rows = _articles_to_preview(articles, params, PREVIEW_N)
-        state = {"articles": articles, "params": params}
-        info = (f"{len(articles)} article(s) répartis en {zrap['nb_zones']} zone(s). "
-                f"Aperçu de {min(PREVIEW_N, len(articles))} réf. — corrige (zone, libellé, "
-                "PV, PA, unité) puis « Exporter ». Le taux de marge est recalculé à l'export.")
-        progress(1.0, desc="Aperçu prêt")
-        return state, gr.update(value=preview_rows, visible=True), info
-    except Exception as exc:
-        tb = traceback.format_exc()
-        return None, gr.update(visible=False), f"❌ Erreur : {exc}\n\n{tb[-600:]}"
-
-
-def run_csv_export(state, edited_rows, progress=gr.Progress()):
-    if not state:
-        return None, "⚠️ Lance d'abord « Analyser & aperçu »."
-    try:
-        progress(0.4, desc="Application des corrections…")
-        articles = _apply_preview_edits(state["articles"], edited_rows)
-        progress(0.6, desc="Écriture des CSV par zone…")
-        zip_path, rapport_txt = _do_export(articles, state["params"])
         progress(1.0, desc="Terminé !")
         return zip_path, rapport_txt
     except Exception as exc:
@@ -304,52 +201,47 @@ with gr.Blocks(title="Atelier — Outils EBP", theme=gr.themes.Soft()) as demo:
                     clean_report_out = gr.Textbox(label="📊 Rapport de nettoyage",
                                                   lines=16, interactive=False)
 
-        # ══════════ ONGLET 2 : CSV → EBP par zone ══════════
-        with gr.Tab("📄 CSV → EBP par zone"):
+        # ══════════ ONGLET 2 : Zones éditables ══════════
+        with gr.Tab("✂️ Zones éditables"):
             gr.Markdown(
-                "Charge un CSV fournisseur, **mappe ses colonnes**. Le fichier est "
-                "**découpé par zone** (à chaque séparation / décalage), chaque zone devient "
-                "**1 CSV au format EBP** (9 colonnes + **Taux de marge** = (PV−PA)/PV×100). "
-                "Aperçu éditable, export ZIP. Unités reprises telles quelles."
+                "Charge un CSV : il est **découpé par zone** (à chaque séparation / décalage) "
+                "et **chaque zone est réalignée** à sa structure la plus logique. Un **éditeur "
+                "par zone** s'affiche ci-dessous — tu vois et corriges les colonnes directement "
+                "là, pas avant. Puis **Exporter** (1 CSV par zone, à nommer à ta main)."
             )
+            zone_csv_in = gr.File(label="CSV à découper", file_types=[".csv", ".tsv", ".txt"])
+            zone_info   = gr.Textbox(label="Zones détectées", interactive=False, lines=2)
+
+            zones_state = gr.State([])
+            edits_state = gr.State({})
+
+            @gr.render(inputs=[zones_state])
+            def render_zone_editors(zones):
+                if not zones:
+                    gr.Markdown("_⬆️ Charge un CSV : chaque zone détectée s'affichera ici, "
+                                "réalignée et éditable._")
+                    return
+                for z in zones:
+                    sep = z["separateur"] or "début de fichier"
+                    gr.Markdown(f"#### ✂️ Zone {z['index']:02d} — « {sep} » · {len(z['rows'])} ligne(s)")
+                    tbl = gr.Dataframe(
+                        value=z["rows"],
+                        headers=z["header"],
+                        col_count=(len(z["header"]), "fixed"),
+                        type="array",
+                        interactive=True,
+                        wrap=True,
+                    )
+                    tbl.change(
+                        fn=partial(save_zone_edit, z["index"]),
+                        inputs=[tbl, edits_state],
+                        outputs=[edits_state],
+                    )
+
+            btn_zone_export = gr.Button("📦 Exporter les zones (ZIP)", variant="primary", size="lg")
             with gr.Row():
-                with gr.Column(scale=2):
-                    csv_in = gr.File(label="CSV fournisseur", file_types=[".csv", ".tsv", ".txt"])
-                    map_info = gr.Textbox(label="Colonnes détectées", interactive=False, lines=1)
-                    gr.Markdown("**Mapping des colonnes** (rempli automatiquement, ajuste si besoin)")
-                    col_ref   = gr.Dropdown(label="Référence (Code article) *", choices=[])
-                    col_lib   = gr.Dropdown(label="Libellé *", choices=[])
-                    col_pa    = gr.Dropdown(label="Prix d'achat HT (PA)", choices=[NONE_COL], value=NONE_COL)
-                    col_pv    = gr.Dropdown(label="Prix de vente HT (PV)", choices=[NONE_COL], value=NONE_COL)
-                    col_unite = gr.Dropdown(label="Unité (laissée telle quelle)", choices=[NONE_COL], value=NONE_COL)
-
-                with gr.Column(scale=1):
-                    gr.Markdown("### 🏭 Paramètres EBP")
-                    csv_fourn_code = gr.Textbox(label="Code fournisseur", placeholder="Ex : CAS001")
-                    csv_taux_tva   = gr.Radio([l for l, _ in TVA_CHOICES], value="20 %",
-                                              label="Taux TVA (pour le PV TTC)")
-
-            with gr.Row():
-                btn_csv_preview = gr.Button("👁️ Analyser & aperçu (10 réf.)", variant="secondary", size="lg")
-
-            csv_preview_info = gr.Textbox(label="Aperçu", interactive=False, lines=2)
-            csv_preview_table = gr.Dataframe(
-                headers=COLS_ARTICLES_EBP_MARGE,
-                datatype=["str"] * len(COLS_ARTICLES_EBP_MARGE),
-                col_count=(len(COLS_ARTICLES_EBP_MARGE), "fixed"),
-                type="pandas",
-                interactive=True,
-                static_columns=[0],  # « Code article » verrouillé (clé d'appariement)
-                wrap=True,
-                visible=False,
-                label="Échantillon — colonnes éditables, sauf « Code article »",
-            )
-            btn_csv_export = gr.Button("📦 Exporter par zone (ZIP)", variant="primary", size="lg")
-            csv_state = gr.State()
-
-            with gr.Row():
-                csv_zip    = gr.File(label="📦 Télécharger les CSV EBP (ZIP)")
-                csv_report = gr.Textbox(label="📊 Rapport", lines=16, interactive=False)
+                zone_zip    = gr.File(label="📦 Télécharger les zones (ZIP)")
+                zone_report = gr.Textbox(label="📊 Rapport d'export", lines=12, interactive=False)
 
     # ── Événements ────────────────────────────────────────────────────────────
     btn_clean.click(
@@ -359,23 +251,16 @@ with gr.Blocks(title="Atelier — Outils EBP", theme=gr.themes.Soft()) as demo:
         outputs=[clean_file_out, clean_report_out],
     )
 
-    csv_in.change(
-        fn=on_csv_uploaded,
-        inputs=[csv_in],
-        outputs=[col_ref, col_lib, col_pa, col_pv, col_unite, map_info],
+    zone_csv_in.change(
+        fn=prepare_zones,
+        inputs=[zone_csv_in],
+        outputs=[zones_state, zone_info, edits_state],
     )
 
-    btn_csv_preview.click(
-        fn=run_csv_preview,
-        inputs=[csv_in, col_ref, col_lib, col_pa, col_pv, col_unite,
-                csv_fourn_code, csv_taux_tva],
-        outputs=[csv_state, csv_preview_table, csv_preview_info],
-    )
-
-    btn_csv_export.click(
-        fn=run_csv_export,
-        inputs=[csv_state, csv_preview_table],
-        outputs=[csv_zip, csv_report],
+    btn_zone_export.click(
+        fn=run_zone_export,
+        inputs=[zones_state, edits_state],
+        outputs=[zone_zip, zone_report],
     )
 
 

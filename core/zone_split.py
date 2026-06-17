@@ -43,17 +43,17 @@ def _pick_header(rows: list[list[str]]) -> int:
 
 def is_separator(row: list[str], header_len: int) -> bool:
     """
-    Vrai si la ligne marque une rupture de zone :
+    Vrai si la ligne marque une rupture de zone (NOUVELLE SECTION) :
       - ligne entièrement vide (séparation), ou
-      - une seule cellule remplie alors que l'en-tête a ≥3 colonnes (titre de section), ou
-      - nombre de cellules différent de l'en-tête (décalage de données).
+      - une seule cellule remplie alors que l'en-tête a ≥3 colonnes (titre de section).
+
+    Un simple écart de nombre de colonnes n'est PAS une rupture : c'est une ligne
+    de données décalée, qui sera réalignée dans sa zone (cf. realign_rows).
     """
     f = _filled(row)
     if f == 0:
         return True
     if f == 1 and header_len >= 3:
-        return True
-    if len(row) != header_len and f >= 1:
         return True
     return False
 
@@ -115,6 +115,45 @@ def split_into_zones(path: str) -> tuple[list[dict], dict]:
         ],
     }
     return zones, rapport
+
+
+def _eff_len(row: list[str]) -> int:
+    """Longueur de la ligne en ignorant les cellules vides de fin."""
+    j = len(row)
+    while j > 0 and not str(row[j - 1]).strip():
+        j -= 1
+    return j
+
+
+def realign_rows(rows: list[list[str]], fallback_header: list[str]) -> tuple[list[str], list[list[str]]]:
+    """
+    Réaligne les lignes d'une zone à une largeur commune, de façon NON destructive :
+    largeur = la plus grande largeur utile rencontrée dans la zone (aucune donnée
+    perdue), les lignes plus courtes sont complétées par des cellules vides.
+    Retourne (header, rows_normalisées).
+
+    L'utilisateur finalise le détail des décalages dans l'éditeur de la zone.
+    """
+    effs = [_eff_len(r) for r in rows]
+    width = max([e for e in effs if e > 0] + [len(fallback_header), 1])
+
+    base = list(fallback_header)
+    # en-têtes : on garde le libellé d'origine quand il existe, sinon ColN
+    # (numérotation par position absolue), puis on rend uniques et non vides.
+    seen: dict[str, int] = {}
+    clean: list[str] = []
+    for i in range(width):
+        h = str(base[i]).strip() if i < len(base) else ""
+        h = h or f"Col{i + 1}"
+        if h in seen:
+            seen[h] += 1
+            h = f"{h}_{seen[h]}"
+        else:
+            seen[h] = 0
+        clean.append(h)
+
+    norm = [list(r)[:width] + [""] * max(0, width - len(r)) for r in rows]
+    return clean, norm
 
 
 def write_zones(zones: list[dict], output_dir: str) -> dict[str, str]:
