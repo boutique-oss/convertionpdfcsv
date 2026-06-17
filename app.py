@@ -1,137 +1,29 @@
-import os
-import tempfile
-import time
-import traceback
+"""
+Point d'entrée du Space : FastAPI minimal + UI Gradio à onglets servie sur /.
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+Une seule page, deux onglets :
+  - 🧹 Nettoyeur CSV          (core.cleaner — 100 % local, sans IA)
+  - 📄 Extracteur PDF → EBP   (core.agent/subfamily — analyse sous-familles + aperçu éditable)
 
-from core.cleaner import clean_csv
+Lancement (Docker) : uvicorn app:app --host 0.0.0.0 --port 7860
+"""
+from dotenv import load_dotenv
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
-app = FastAPI(title="Nettoyeur CSV")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+import gradio as gr
 
-MAX_CSV_MB = 50
+from app_gradio import demo
 
-# Résultats temporaires : {download_id: (chemin, nom_origine, timestamp)}
-_results: dict[str, tuple[str, str, float]] = {}
-_RESULT_TTL = 3600  # 1 h
+load_dotenv()
 
-
-def _purge_old():
-    now = time.time()
-    for did, (path, _name, ts) in list(_results.items()):
-        if now - ts > _RESULT_TTL:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-            _results.pop(did, None)
+app = FastAPI(title="Atelier EBP — Nettoyeur CSV + Extracteur PDF")
 
 
 @app.get("/ping")
 async def ping():
-    return {"ok": True}
+    return JSONResponse({"ok": True})
 
 
-@app.get("/")
-async def index():
-    return FileResponse("static/index.html")
-
-
-@app.post("/clean")
-async def clean(
-    csv_file: UploadFile = File(...),
-    drop_empty: bool = Form(True),
-    drop_duplicates: bool = Form(True),
-    trim_whitespace: bool = Form(True),
-    normalize_headers: bool = Form(True),
-    remove_symbols: bool = Form(False),
-    keep_digits_only: bool = Form(False),
-    decimal_comma: bool = Form(False),
-    ebp_format: bool = Form(False),
-):
-    name = csv_file.filename or "fichier.csv"
-    if not name.lower().endswith((".csv", ".txt", ".tsv")):
-        raise HTTPException(status_code=400, detail="Le fichier doit être un .csv, .tsv ou .txt.")
-
-    raw = b""
-    chunk_size = 1024 * 1024
-    while True:
-        chunk = await csv_file.read(chunk_size)
-        if not chunk:
-            break
-        raw += chunk
-        if len(raw) > MAX_CSV_MB * 1024 * 1024:
-            raise HTTPException(
-                status_code=413,
-                detail=f"Fichier trop volumineux (max {MAX_CSV_MB} MB).",
-            )
-
-    if not raw.strip():
-        raise HTTPException(status_code=400, detail="Le fichier est vide.")
-
-    options = {
-        "drop_empty": drop_empty,
-        "drop_duplicates": drop_duplicates,
-        "trim_whitespace": trim_whitespace,
-        "normalize_headers": normalize_headers,
-        "remove_symbols": remove_symbols,
-        "keep_digits_only": keep_digits_only,
-        "decimal_comma": decimal_comma,
-        "ebp_format": ebp_format,
-    }
-
-    try:
-        cleaned, report = clean_csv(raw, options)
-    except Exception as exc:  # noqa: BLE001
-        detail = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()[-400:]}"
-        raise HTTPException(status_code=422, detail=detail)
-
-    _purge_old()
-    out = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
-    out.write(cleaned)
-    out.close()
-
-    download_id = os.path.splitext(os.path.basename(out.name))[0]
-    base, ext = os.path.splitext(os.path.basename(name))
-    out_name = f"{base}_nettoye{ext or '.csv'}"
-    _results[download_id] = (out.name, out_name, time.time())
-
-    return JSONResponse({"download_id": download_id, "report": report})
-
-
-@app.get("/download/{download_id}")
-async def download(download_id: str):
-    entry = _results.get(download_id)
-    if not entry:
-        raise HTTPException(status_code=404, detail="Résultat expiré ou introuvable.")
-    path, out_name, _ts = entry
-    return FileResponse(
-        path,
-        filename=out_name,
-        media_type="text/csv; charset=utf-8",
-    )
-
-
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
-
-# ── Extracteur catalogue PDF → CSV EBP (UI Gradio) ───────────────────────────
-# Monté sur /extracteur. Inclut l'analyse des sous-familles et l'aperçu éditable.
-# Isolé dans un try : si une dépendance lourde (PyMuPDF/anthropic/gradio) manque,
-# le nettoyeur CSV reste disponible sur /.
-try:
-    import gradio as gr
-    from app_gradio import demo as _extracteur_demo
-
-    app = gr.mount_gradio_app(app, _extracteur_demo, path="/extracteur")
-except Exception as exc:  # noqa: BLE001
-    print(f"[extracteur] UI Gradio non montée : {type(exc).__name__}: {exc}")
+# UI Gradio (les deux onglets) montée à la racine.
+app = gr.mount_gradio_app(app, demo, path="/")

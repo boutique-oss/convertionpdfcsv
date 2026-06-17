@@ -22,6 +22,7 @@ from core.csv_writer import (
     export_ebp, export_articles_par_famille,
     COLS_ARTICLES_EBP, _build_article_ebp_row,
 )
+from core.cleaner import clean_csv
 from core.extractor import debug_layout
 from core.profil import list_profiles, load_profile, save_profile
 from core.subfamily import analyse_sous_familles
@@ -482,109 +483,189 @@ def refresh_profiles():
     return gr.update(choices=choices, value="(aucun)")
 
 
+# ── Nettoyeur CSV (onglet) ────────────────────────────────────────────────────
+
+def _format_clean_report(report: dict) -> str:
+    lines = [
+        "═══ RAPPORT DE NETTOYAGE ═══",
+        f"Encodage détecté   : {report.get('encodage_detecte')}",
+        f"Séparateur détecté : {report.get('separateur_detecte')}",
+        f"Lignes   : {report.get('lignes_initiales')} → {report.get('lignes_finales')}",
+        f"Colonnes : {report.get('colonnes_initiales')} → {report.get('colonnes_finales')}",
+        f"Sortie   : séparateur '{report.get('separateur_sortie')}' / {report.get('encodage_sortie')}",
+        "",
+        "Actions :",
+    ]
+    for a in report.get("actions", []):
+        lines.append(f"  • {a}")
+    return "\n".join(lines)
+
+
+def run_clean(csv_file, drop_empty, drop_duplicates, trim_whitespace,
+              normalize_headers, remove_symbols, keep_digits_only,
+              decimal_comma, ebp_format):
+    if csv_file is None:
+        return None, "⚠️ Aucun fichier CSV fourni."
+    try:
+        raw = Path(csv_file.name).read_bytes()
+    except Exception as exc:
+        return None, f"❌ Lecture impossible : {exc}"
+    if not raw.strip():
+        return None, "⚠️ Le fichier est vide."
+
+    options = {
+        "drop_empty": drop_empty, "drop_duplicates": drop_duplicates,
+        "trim_whitespace": trim_whitespace, "normalize_headers": normalize_headers,
+        "remove_symbols": remove_symbols, "keep_digits_only": keep_digits_only,
+        "decimal_comma": decimal_comma, "ebp_format": ebp_format,
+    }
+    try:
+        cleaned, report = clean_csv(raw, options)
+    except Exception as exc:
+        tb = traceback.format_exc()
+        return None, f"❌ Erreur : {exc}\n\n{tb[-500:]}"
+
+    base = Path(csv_file.name).stem or "fichier"
+    out_dir = tempfile.mkdtemp(prefix="csv_clean_")
+    out_path = os.path.join(out_dir, f"{base}_nettoye.csv")
+    Path(out_path).write_bytes(cleaned)
+    return out_path, _format_clean_report(report)
+
+
 # ── Interface Gradio ──────────────────────────────────────────────────────────
 
-with gr.Blocks(title="PDF → CSV EBP", theme=gr.themes.Soft()) as demo:
-    gr.Markdown("# 📄 Catalogue PDF → CSV EBP Gestion Commerciale")
-    gr.Markdown(
-        "Convertit un catalogue fournisseur PDF en 3 fichiers CSV prêts à importer dans EBP "
-        "(familles → fournisseur → articles). Les prix ne sont jamais inventés : "
-        "chaque valeur est tracée au texte source."
-    )
+with gr.Blocks(title="Atelier — Outils EBP", theme=gr.themes.Soft()) as demo:
+    gr.Markdown("# 🧰 Atelier — Outils CSV / PDF pour EBP Gestion Commerciale")
 
-    with gr.Row():
-        with gr.Column(scale=2):
-            gr.Markdown("### 📁 Fichier & pages")
-            pdf_input   = gr.File(label="Catalogue PDF", file_types=[".pdf"])
+    with gr.Tabs():
+
+        # ══════════ ONGLET 1 : Nettoyeur CSV ══════════
+        with gr.Tab("🧹 Nettoyeur CSV"):
+            gr.Markdown("Charge un CSV, choisis le nettoyage, récupère un fichier propre. "
+                        "100 % local, sans IA ni clé API.")
             with gr.Row():
-                page_from = gr.Slider(1, 500, value=1, step=1, label="Page début")
-                page_to   = gr.Slider(1, 500, value=50, step=1, label="Page fin")
-            sample_mode = gr.Checkbox(label="Mode échantillon (30 premières lignes)", value=False)
-            with gr.Row():
-                btn_debug = gr.Button("🔍 Analyser la structure du PDF", size="sm")
-            debug_output = gr.Textbox(label="Structure par page (tables / lignes / prix)", lines=8,
-                                      interactive=False, visible=False)
+                with gr.Column(scale=2):
+                    clean_input = gr.File(label="Fichier CSV / TSV / TXT",
+                                          file_types=[".csv", ".tsv", ".txt"])
+                    with gr.Row():
+                        opt_drop_empty = gr.Checkbox(label="Supprimer lignes/colonnes vides", value=True)
+                        opt_drop_dup   = gr.Checkbox(label="Supprimer les doublons", value=True)
+                    with gr.Row():
+                        opt_trim    = gr.Checkbox(label="Espaces superflus", value=True)
+                        opt_headers = gr.Checkbox(label="Normaliser les en-têtes", value=True)
+                    with gr.Row():
+                        opt_remove_sym = gr.Checkbox(label="Retirer les symboles (€ % # *…)", value=False)
+                        opt_digits     = gr.Checkbox(label="Garder uniquement les chiffres", value=False)
+                    with gr.Row():
+                        opt_decimal = gr.Checkbox(label="Décimales en virgule FR", value=False)
+                        opt_ebp     = gr.Checkbox(label="Format EBP ( ; / utf-8-sig )", value=False)
+                    btn_clean = gr.Button("🧹 Nettoyer", variant="primary", size="lg")
+                with gr.Column(scale=2):
+                    clean_file_out   = gr.File(label="📥 CSV nettoyé")
+                    clean_report_out = gr.Textbox(label="📊 Rapport de nettoyage",
+                                                  lines=16, interactive=False)
 
-        with gr.Column(scale=2):
-            gr.Markdown("### 🏭 Fournisseur")
-            with gr.Row():
-                profil_dropdown = gr.Dropdown(
-                    choices=["(aucun)"] + list_profiles(),
-                    value="(aucun)",
-                    label="Charger un profil",
-                    interactive=True,
-                )
-                btn_refresh = gr.Button("🔄", size="sm")
-
-            fournisseur_nom  = gr.Textbox(label="Nom du fournisseur *", placeholder="Ex : CASAMANCE")
-            fournisseur_code = gr.Textbox(label="Code fournisseur", placeholder="Ex : CAS001")
-            code_famille     = gr.Textbox(label="Code famille EBP par défaut", value="FFR00001")
-            collection_famille_map_input = gr.Textbox(
-                label="Mapping collection → code famille EBP (JSON optionnel)",
-                placeholder='{"CHOREGRAPHIE": "TIS-DEC", "PIUMA": "TIS-VEL"}',
-                lines=2,
-            )
-            profil_save_nom  = gr.Textbox(label="Sauvegarder ce profil sous…",
-                                          placeholder="laisser vide pour ne pas sauvegarder")
-
-        with gr.Column(scale=1):
-            gr.Markdown("### ⚙️ Paramètres")
-            remise_input  = gr.Slider(0, 80, value=45, step=1, label="Remise fournisseur (%)")
-            prix_ttc_toggle = gr.Checkbox(label="Les prix du catalogue sont TTC", value=False)
-            taux_tva   = gr.Radio([l for l, _ in TVA_CHOICES], value="20 %", label="Taux TVA (si prix TTC)")
-            unite_def  = gr.Dropdown(UNITE_CHOICES, value="ml", label="Unité par défaut")
-            regex_config_input = gr.Textbox(
-                label="Extracteur regex (JSON optionnel — prioritaire sur le LLM)",
-                placeholder='{"pattern_ligne": "...", "group_nom": 1, ...}',
-                lines=3,
-            )
-
-    with gr.Row():
-        with gr.Column():
-            gr.Markdown("### 🗂️ Analyse des sous-familles")
+        # ══════════ ONGLET 2 : Extracteur PDF → CSV EBP ══════════
+        with gr.Tab("📄 Extracteur PDF → CSV EBP"):
             gr.Markdown(
-                "Classe chaque article dans sa famille EBP "
-                "(TAPISSERIE · RIDEAU · MOUSSE · SELLERIE) et produit "
-                "**1 fichier CSV par famille** au format écran « Articles » EBP."
-            )
-            analyse_familles_toggle = gr.Checkbox(
-                label="Activer l'analyse des sous-familles (export par famille)",
-                value=True,
-            )
-            classif_llm_toggle = gr.Checkbox(
-                label="Affiner les cas ambigus avec Claude (sinon règles seules)",
-                value=True,
+                "Convertit un catalogue fournisseur PDF en CSV EBP "
+                "(familles → fournisseur → articles), avec analyse des sous-familles. "
+                "Les prix ne sont jamais inventés : chaque valeur est tracée au texte source."
             )
 
-    with gr.Row():
-        btn_preview = gr.Button("👁️ Aperçu éditable (10 réf.)", variant="secondary", size="lg")
-        btn_convert = gr.Button("▶️ Convertir directement (sans aperçu)", variant="primary", size="lg")
+            with gr.Row():
+                with gr.Column(scale=2):
+                    gr.Markdown("### 📁 Fichier & pages")
+                    pdf_input   = gr.File(label="Catalogue PDF", file_types=[".pdf"])
+                    with gr.Row():
+                        page_from = gr.Slider(1, 500, value=1, step=1, label="Page début")
+                        page_to   = gr.Slider(1, 500, value=50, step=1, label="Page fin")
+                    sample_mode = gr.Checkbox(label="Mode échantillon (30 premières lignes)", value=False)
+                    with gr.Row():
+                        btn_debug = gr.Button("🔍 Analyser la structure du PDF", size="sm")
+                    debug_output = gr.Textbox(label="Structure par page (tables / lignes / prix)", lines=8,
+                                              interactive=False, visible=False)
 
-    # ── Aperçu éditable avant export ─────────────────────────────────────────
-    gr.Markdown("### ✏️ Aperçu éditable — corrige avant l'export")
-    preview_info = gr.Textbox(label="Aperçu", interactive=False, lines=2)
-    preview_table = gr.Dataframe(
-        headers=COLS_ARTICLES_EBP,
-        datatype=["str"] * len(COLS_ARTICLES_EBP),
-        col_count=(len(COLS_ARTICLES_EBP), "fixed"),
-        type="pandas",
-        interactive=True,
-        # « Code article » (clé d'appariement) verrouillé ; colonnes éditables.
-        static_columns=[0],
-        wrap=True,
-        visible=False,
-        label="Échantillon — colonnes éditables, sauf « Code article »",
-    )
-    btn_export = gr.Button("📦 Exporter l'aperçu validé", variant="primary", size="lg")
+                with gr.Column(scale=2):
+                    gr.Markdown("### 🏭 Fournisseur")
+                    with gr.Row():
+                        profil_dropdown = gr.Dropdown(
+                            choices=["(aucun)"] + list_profiles(),
+                            value="(aucun)",
+                            label="Charger un profil",
+                            interactive=True,
+                        )
+                        btn_refresh = gr.Button("🔄", size="sm")
 
-    preview_state = gr.State()
+                    fournisseur_nom  = gr.Textbox(label="Nom du fournisseur *", placeholder="Ex : CASAMANCE")
+                    fournisseur_code = gr.Textbox(label="Code fournisseur", placeholder="Ex : CAS001")
+                    code_famille     = gr.Textbox(label="Code famille EBP par défaut", value="FFR00001")
+                    collection_famille_map_input = gr.Textbox(
+                        label="Mapping collection → code famille EBP (JSON optionnel)",
+                        placeholder='{"CHOREGRAPHIE": "TIS-DEC", "PIUMA": "TIS-VEL"}',
+                        lines=2,
+                    )
+                    profil_save_nom  = gr.Textbox(label="Sauvegarder ce profil sous…",
+                                                  placeholder="laisser vide pour ne pas sauvegarder")
 
-    with gr.Row():
-        zip_output     = gr.File(label="📦 Télécharger les fichiers CSV (ZIP)")
-        rapport_output = gr.Textbox(label="📊 Rapport d'audit", lines=20, interactive=False)
+                with gr.Column(scale=1):
+                    gr.Markdown("### ⚙️ Paramètres")
+                    remise_input  = gr.Slider(0, 80, value=45, step=1, label="Remise fournisseur (%)")
+                    prix_ttc_toggle = gr.Checkbox(label="Les prix du catalogue sont TTC", value=False)
+                    taux_tva   = gr.Radio([l for l, _ in TVA_CHOICES], value="20 %", label="Taux TVA (si prix TTC)")
+                    unite_def  = gr.Dropdown(UNITE_CHOICES, value="ml", label="Unité par défaut")
+                    regex_config_input = gr.Textbox(
+                        label="Extracteur regex (JSON optionnel — prioritaire sur le LLM)",
+                        placeholder='{"pattern_ligne": "...", "group_nom": 1, ...}',
+                        lines=3,
+                    )
 
-    anomalies_output = gr.Textbox(label="⚠️ Anomalies (prix non traçables)", lines=6, interactive=False)
-    err_output       = gr.Textbox(label="Erreur", visible=False)
+            with gr.Row():
+                with gr.Column():
+                    gr.Markdown("### 🗂️ Analyse des sous-familles")
+                    gr.Markdown(
+                        "Classe chaque article dans sa famille EBP "
+                        "(TAPISSERIE · RIDEAU · MOUSSE · SELLERIE) et produit "
+                        "**1 fichier CSV par famille** au format écran « Articles » EBP."
+                    )
+                    analyse_familles_toggle = gr.Checkbox(
+                        label="Activer l'analyse des sous-familles (export par famille)",
+                        value=True,
+                    )
+                    classif_llm_toggle = gr.Checkbox(
+                        label="Affiner les cas ambigus avec Claude (sinon règles seules)",
+                        value=True,
+                    )
+
+            with gr.Row():
+                btn_preview = gr.Button("👁️ Aperçu éditable (10 réf.)", variant="secondary", size="lg")
+                btn_convert = gr.Button("▶️ Convertir directement (sans aperçu)", variant="primary", size="lg")
+
+            # ── Aperçu éditable avant export ─────────────────────────────────
+            gr.Markdown("### ✏️ Aperçu éditable — corrige avant l'export")
+            preview_info = gr.Textbox(label="Aperçu", interactive=False, lines=2)
+            preview_table = gr.Dataframe(
+                headers=COLS_ARTICLES_EBP,
+                datatype=["str"] * len(COLS_ARTICLES_EBP),
+                col_count=(len(COLS_ARTICLES_EBP), "fixed"),
+                type="pandas",
+                interactive=True,
+                # « Code article » (clé d'appariement) verrouillé ; colonnes éditables.
+                static_columns=[0],
+                wrap=True,
+                visible=False,
+                label="Échantillon — colonnes éditables, sauf « Code article »",
+            )
+            btn_export = gr.Button("📦 Exporter l'aperçu validé", variant="primary", size="lg")
+
+            preview_state = gr.State()
+
+            with gr.Row():
+                zip_output     = gr.File(label="📦 Télécharger les fichiers CSV (ZIP)")
+                rapport_output = gr.Textbox(label="📊 Rapport d'audit", lines=20, interactive=False)
+
+            anomalies_output = gr.Textbox(label="⚠️ Anomalies (prix non traçables)", lines=6, interactive=False)
+            err_output       = gr.Textbox(label="Erreur", visible=False)
 
     _convert_inputs = [
         pdf_input, page_from, page_to,
@@ -597,6 +678,13 @@ with gr.Blocks(title="PDF → CSV EBP", theme=gr.themes.Soft()) as demo:
     ]
 
     # ── Événements ──────────────────────────────────────────────────────────
+    btn_clean.click(
+        fn=run_clean,
+        inputs=[clean_input, opt_drop_empty, opt_drop_dup, opt_trim, opt_headers,
+                opt_remove_sym, opt_digits, opt_decimal, opt_ebp],
+        outputs=[clean_file_out, clean_report_out],
+    )
+
     btn_debug.click(
         fn=run_debug_layout,
         inputs=[pdf_input, page_from, page_to],
