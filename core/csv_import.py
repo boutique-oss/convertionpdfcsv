@@ -61,6 +61,45 @@ def parse_price(val) -> float:
     return float(m.group()) if m else 0.0
 
 
+def zone_rows_to_articles(zones: list[dict], ref_col: str, lib_col: str,
+                          pa_col: str | None, pv_col: str | None,
+                          unite_col: str | None) -> list[dict]:
+    """
+    Convertit les lignes des zones (issues de core.zone_split) en dicts article,
+    chaque article tagué avec sa zone (code_sous_famille = libellé du séparateur).
+
+    Le mapping se fait par nom de colonne, résolu en index via l'en-tête commun.
+    """
+    if not zones:
+        return []
+    header = [str(c) for c in zones[0]["header"]]
+
+    def idx(name):
+        return header.index(name) if name and name != NONE_COL and name in header else None
+
+    i_ref, i_lib = idx(ref_col), idx(lib_col)
+    i_pa, i_pv, i_un = idx(pa_col), idx(pv_col), idx(unite_col)
+
+    def cell(row, i):
+        return str(row[i]).strip() if (i is not None and i < len(row)) else ""
+
+    articles: list[dict] = []
+    for z in zones:
+        label = z.get("separateur") or f"ZONE_{z['index']:02d}"
+        for row in z["rows"]:
+            a = {
+                "reference":         cell(row, i_ref),
+                "nom_dessin":        cell(row, i_lib),
+                "prix_achat":        parse_price(cell(row, i_pa)) if i_pa is not None else 0.0,
+                "prix_conseille":    parse_price(cell(row, i_pv)) if i_pv is not None else 0.0,
+                "unite":             cell(row, i_un),
+                "code_sous_famille": label,
+            }
+            if a["reference"] or a["nom_dessin"]:
+                articles.append(a)
+    return articles
+
+
 def csv_to_articles(df: pd.DataFrame, ref_col: str, lib_col: str,
                     prix_col: str | None, unite_col: str | None) -> list[dict]:
     """

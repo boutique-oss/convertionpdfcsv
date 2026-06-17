@@ -313,6 +313,82 @@ def export_articles_par_famille(
     return produits
 
 
+COL_TAUX_MARGE = "Taux de marge"
+COLS_ARTICLES_EBP_MARGE = COLS_ARTICLES_EBP + [COL_TAUX_MARGE]
+
+
+def build_ebp_row_marge(
+    a: dict,
+    fournisseur_code: str,
+    taux_tva: float = 20.0,
+    code_tva: str = "TVA20",
+) -> dict:
+    """
+    Ligne EBP « écran Articles » + colonne « Taux de marge ».
+
+    Utilise le prix d'achat (a['prix_achat']) ET le prix de vente
+    (a['prix_conseille']), tous deux HT, sans remise. Unité telle quelle.
+    Taux de marge = (PV − PA) / PV × 100.
+    """
+    ref     = str(a.get("reference") or a.get("code") or "").strip()
+    libelle = _truncate(a.get("nom_dessin") or a.get("libelle") or "", 80)
+    unite   = str(a.get("unite") or "").strip()
+    famille = str(a.get("code_sous_famille") or "").strip()
+
+    pv = float(a.get("prix_conseille") or 0)   # prix de vente HT
+    pa = float(a.get("prix_achat") or 0)       # prix d'achat HT
+
+    pv_ttc = round(pv * (1 + taux_tva / 100), 2) if pv else 0.0
+    marge  = round((pv - pa) / pv * 100, 2) if pv else None
+
+    return {
+        "Code article":              ref,
+        "Libellé":                   libelle,
+        "PV HT public conseillé":    _fmt_decimal(pv) if pv else "",
+        "PV TTC":                    _fmt_decimal(pv_ttc) if pv_ttc else "",
+        "Code unité":                unite,
+        "Prix d'achat":              _fmt_decimal(pa) if pa else "",
+        "Montant de TVA":            code_tva,
+        "Code fournisseur":          fournisseur_code,
+        "Code sous-famille article": famille,
+        COL_TAUX_MARGE:              _fmt_decimal(marge) if marge is not None else "",
+    }
+
+
+def export_articles_par_zone(
+    articles: list[dict],
+    output_dir: str,
+    fournisseur_code: str,
+    taux_tva: float = 20.0,
+    code_tva: str = "TVA20",
+) -> dict[str, str]:
+    """
+    Export EBP « écran Articles » + Taux de marge, 1 fichier CSV par ZONE
+    (regroupement sur `code_sous_famille`, qui porte le libellé de la zone).
+
+    Nommage : zone_NN_<label>.csv. Retourne {nom_fichier: chemin}.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    from collections import defaultdict
+    groupes: dict[str, list[dict]] = defaultdict(list)
+    for a in articles:
+        zone = str(a.get("code_sous_famille") or "ZONE").strip() or "ZONE"
+        groupes[zone].append(a)
+
+    produced: dict[str, str] = {}
+    for i, zone in enumerate(sorted(groupes), 1):
+        rows = [
+            build_ebp_row_marge(a, fournisseur_code, taux_tva, code_tva)
+            for a in groupes[zone]
+        ]
+        fname = f"zone_{i:02d}_{_safe_filename(zone)}.csv"
+        path = os.path.join(output_dir, fname)
+        _write_csv(rows, COLS_ARTICLES_EBP_MARGE, path)
+        produced[fname] = path
+    return produced
+
+
 def _make_famille_code(libelle: str) -> str:
     cleaned = "".join(c for c in libelle.upper() if c.isalpha() or c.isspace())
     words = cleaned.split()
