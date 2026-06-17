@@ -178,6 +178,14 @@
       </label>
 
       <label class="opt">
+        <input type="checkbox" name="remove_symbols" />
+        <span class="opt-text">
+          <span class="opt-title">Retirer les symboles</span>
+          <span class="opt-desc">Supprime €, %, #, *, ®… en gardant lettres et chiffres (12,50 € → 12,50, Réf#12 → Réf12).</span>
+        </span>
+      </label>
+
+      <label class="opt">
         <input type="checkbox" name="keep_digits_only" />
         <span class="opt-text">
           <span class="opt-title">Garder uniquement les chiffres</span>
@@ -268,7 +276,7 @@
       const base = window.location.origin;
       const fd = new FormData();
       fd.append('csv_file', csvInput.files[0]);
-      ['drop_empty','drop_duplicates','trim_whitespace','normalize_headers','keep_digits_only','decimal_comma','ebp_format']
+      ['drop_empty','drop_duplicates','trim_whitespace','normalize_headers','remove_symbols','keep_digits_only','decimal_comma','ebp_format']
         .forEach(name => {
           const el = form.querySelector(`[name="${name}"]`);
           fd.append(name, el.checked ? 'true' : 'false');

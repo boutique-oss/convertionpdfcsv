@@ -82,6 +82,17 @@ def _looks_numeric(value: str) -> bool:
     return bool(_NUM_RE.match(value)) and any(c.isdigit() for c in value)
 
 
+# Tout sauf lettres (accents compris), chiffres, espaces et séparateurs , . -
+_SYMBOL_RE = re.compile(r"[^\w\s.,\-]", re.UNICODE)
+
+
+def _remove_symbols(value: str) -> str:
+    """Retire les symboles (€, %, #, *, ®, etc.) en gardant lettres, chiffres,
+    espaces et séparateurs décimaux. Ex. : "12,50 €" → "12,50", "Réf#12" → "Réf12"."""
+    new = _SYMBOL_RE.sub("", value)
+    return re.sub(r"\s+", " ", new).strip()
+
+
 def _strip_to_digits(value: str) -> str:
     """
     Retire lettres, symboles et espaces, ne garde que les chiffres et les
@@ -198,6 +209,23 @@ def clean_csv(raw: bytes, options: dict) -> tuple[bytes, dict]:
         removed = before - len(df)
         if removed:
             log(f"{removed} ligne(s) en double supprimée(s).")
+
+    # 4a. Retirer tous les symboles (€, %, #, *…) en gardant lettres et chiffres
+    if options.get("remove_symbols"):
+        cleaned_cells = 0
+
+        def desymbol(x):
+            nonlocal cleaned_cells
+            if isinstance(x, str):
+                new = _remove_symbols(x)
+                if new != x:
+                    cleaned_cells += 1
+                return new
+            return x
+
+        df = df.apply(lambda col: col.map(desymbol))
+        if cleaned_cells:
+            log(f"{cleaned_cells} cellule(s) : symboles retirés.")
 
     # 4b. Garder uniquement les chiffres (retire lettres/symboles des montants)
     if options.get("keep_digits_only"):

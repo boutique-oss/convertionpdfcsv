@@ -4,7 +4,7 @@ from core.cleaner import clean_csv, detect_delimiter, detect_encoding
 
 def _opts(**over):
     base = dict(drop_empty=False, drop_duplicates=False, trim_whitespace=False,
-                normalize_headers=False, keep_digits_only=False,
+                normalize_headers=False, remove_symbols=False, keep_digits_only=False,
                 decimal_comma=False, ebp_format=False)
     base.update(over)
     return base
@@ -74,6 +74,13 @@ def test_ebp_format_output():
     assert rep["separateur_sortie"] == ";"
     assert out.startswith(b"\xef\xbb\xbf")  # BOM utf-8-sig
     assert b"\r\n" in out
+
+
+def test_remove_symbols_keeps_letters_and_digits():
+    raw = "ref;prix\nRéf#12;12,50 €\nA*B;99 %\n".encode("utf-8")
+    out, _ = clean_csv(raw, _opts(remove_symbols=True))
+    body = out.decode("utf-8-sig").splitlines()[1:]
+    assert body == ["Réf12;12,50", "AB;99"]
 
 
 def test_keep_digits_only_strips_letters_symbols():
