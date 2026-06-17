@@ -18,9 +18,13 @@ import gradio as gr
 from dotenv import load_dotenv
 
 from core.agent import extract_articles
-from core.csv_writer import export_ebp
+from core.csv_writer import (
+    export_ebp, export_articles_par_famille,
+    COLS_ARTICLES_EBP, _build_article_ebp_row,
+)
 from core.extractor import debug_layout
 from core.profil import list_profiles, load_profile, save_profile
+from core.subfamily import analyse_sous_familles
 
 load_dotenv()
 
@@ -57,66 +61,52 @@ def run_debug_layout(pdf_file, page_from: int, page_to: int) -> str:
         return f"❌ Erreur : {exc}"
 
 
-def run_conversion(
-    pdf_file,
-    page_from: int,
-    page_to: int,
-    fournisseur_nom: str,
-    fournisseur_code: str,
-    code_famille: str,
-    remise: float,
-    prix_sont_ttc: bool,
-    taux_tva_label: str,
-    unite_defaut: str,
-    sample_mode: bool,
-    profil_nom_save: str,
-    collection_famille_map_json: str,
-    regex_config_json: str,
-    progress=gr.Progress(),
-):
-    if pdf_file is None:
-        return None, "⚠️ Aucun fichier PDF fourni.", "", ""
+PREVIEW_N = 10  # nombre de références montrées dans l'aperçu éditable
 
-    fournisseur_nom  = fournisseur_nom.strip()
-    fournisseur_code = fournisseur_code.strip().upper()
+
+def _build_params(
+    fournisseur_nom, fournisseur_code, code_famille, remise, prix_sont_ttc,
+    taux_tva_label, unite_defaut, sample_mode, profil_nom_save,
+    collection_famille_map_json, regex_config_json, analyse_familles, classif_llm,
+) -> dict:
+    """Valide et normalise les paramètres. Lève ValueError avec un message FR."""
+    fournisseur_nom  = (fournisseur_nom or "").strip()
+    fournisseur_code = (fournisseur_code or "").strip().upper()
 
     if not fournisseur_nom:
-        return None, "⚠️ Le nom du fournisseur est obligatoire.", "", ""
+        raise ValueError("Le nom du fournisseur est obligatoire.")
     if not fournisseur_code:
         fournisseur_code = fournisseur_nom[:8].upper().replace(" ", "")
 
-    # Résolution taux TVA
     taux_tva = 20.0
     for label, val in TVA_CHOICES:
         if label == taux_tva_label:
             taux_tva = val
             break
 
-    # Parse JSON optionnels
-    collection_famille_map: dict | None = None
-    if collection_famille_map_json.strip():
+    collection_famille_map = None
+    if (collection_famille_map_json or "").strip():
         try:
             collection_famille_map = json.loads(collection_famille_map_json)
         except json.JSONDecodeError:
-            return None, "⚠️ JSON du mapping collection invalide.", "", ""
+            raise ValueError("JSON du mapping collection invalide.")
 
-    regex_config: dict | None = None
-    if regex_config_json.strip():
+    regex_config = None
+    if (regex_config_json or "").strip():
         try:
             regex_config = json.loads(regex_config_json)
         except json.JSONDecodeError:
-            return None, "⚠️ JSON de l'extracteur regex invalide.", "", ""
+            raise ValueError("JSON de l'extracteur regex invalide.")
 
-    # Sauvegarde du profil si demandée
-    if profil_nom_save.strip():
+    if (profil_nom_save or "").strip():
         profil_data: dict = {
-            "fournisseur_nom":         fournisseur_nom,
-            "fournisseur_code":        fournisseur_code,
-            "code_famille":            code_famille,
-            "remise":                  remise,
-            "prix_sont_ttc":           prix_sont_ttc,
-            "taux_tva_label":          taux_tva_label,
-            "unite_defaut":            unite_defaut,
+            "fournisseur_nom":  fournisseur_nom,
+            "fournisseur_code": fournisseur_code,
+            "code_famille":     code_famille,
+            "remise":           remise,
+            "prix_sont_ttc":    prix_sont_ttc,
+            "taux_tva_label":   taux_tva_label,
+            "unite_defaut":     unite_defaut,
         }
         if collection_famille_map:
             profil_data["collection_famille_map"] = collection_famille_map
@@ -124,67 +114,261 @@ def run_conversion(
             profil_data["regex_config"] = regex_config
         save_profile(profil_nom_save.strip(), profil_data)
 
-    def _progress_cb(done, total):
+    return {
+        "fournisseur_nom":        fournisseur_nom,
+        "fournisseur_code":       fournisseur_code,
+        "code_famille":           code_famille,
+        "remise":                 remise,
+        "prix_sont_ttc":          prix_sont_ttc,
+        "taux_tva":               taux_tva,
+        "unite_defaut":           unite_defaut,
+        "sample_mode":            sample_mode,
+        "collection_famille_map": collection_famille_map,
+        "regex_config":           regex_config,
+        "analyse_familles":       analyse_familles,
+        "classif_llm":            classif_llm,
+    }
+
+
+def _extract_and_analyse(pdf_path, page_from, page_to, params, progress_cb=None):
+    """Extraction + analyse des sous-familles. Retourne (valides, anomalies, rapport, rapport_familles)."""
+    valides, anomalies, rapport = extract_articles(
+        pdf_path=pdf_path,
+        page_from=page_from,
+        page_to=page_to,
+        password="",
+        default_unit=params["unite_defaut"],
+        progress_cb=progress_cb,
+        sample_mode=params["sample_mode"],
+        regex_config=params["regex_config"],
+    )
+
+    rapport_familles = None
+    if params["analyse_familles"] and valides:
+        client = None
+        if params["classif_llm"]:
+            import anthropic
+            try:
+                client = anthropic.Anthropic()
+            except Exception:
+                client = None
+        valides, rapport_familles = analyse_sous_familles(
+            valides, use_llm=params["classif_llm"] and client is not None, client=client,
+        )
+    return valides, anomalies, rapport, rapport_familles
+
+
+def _do_export(valides, anomalies, rapport, rapport_familles, params):
+    """Écrit tous les CSV + rapport + ZIP. Retourne (zip_path, rapport_txt)."""
+    out_dir = tempfile.mkdtemp(prefix="ebp_export_")
+
+    export_ebp(
+        articles=valides,
+        output_dir=out_dir,
+        fournisseur_nom=params["fournisseur_nom"],
+        fournisseur_code=params["fournisseur_code"],
+        remise=params["remise"],
+        unite_defaut=params["unite_defaut"],
+        code_famille=params["code_famille"],
+        prix_sont_ttc=params["prix_sont_ttc"],
+        taux_tva=params["taux_tva"],
+        collection_famille_map=params["collection_famille_map"],
+    )
+
+    if params["analyse_familles"] and valides:
+        export_articles_par_famille(
+            articles=valides,
+            output_dir=out_dir,
+            fournisseur_code=params["fournisseur_code"],
+            remise=params["remise"],
+            unite_defaut=params["unite_defaut"],
+            taux_tva=params["taux_tva"],
+            prix_sont_ttc=params["prix_sont_ttc"],
+        )
+
+    rapport_txt = _build_rapport(rapport, valides, anomalies,
+                                 params["sample_mode"], rapport_familles)
+    rapport_path = os.path.join(out_dir, "rapport_conversion.txt")
+    Path(rapport_path).write_text(rapport_txt, encoding="utf-8")
+
+    if anomalies:
+        _write_anomalies(anomalies, os.path.join(out_dir, "anomalies.csv"))
+
+    zip_path = os.path.join(out_dir, "export_ebp.zip")
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for f in Path(out_dir).glob("*.csv"):
+            zf.write(f, f.name)
+        zf.write(rapport_path, "rapport_conversion.txt")
+
+    return zip_path, rapport_txt
+
+
+# ── Aperçu éditable (10 réf.) ────────────────────────────────────────────────
+
+def _articles_to_preview(articles: list[dict], params: dict, n: int) -> list[list[str]]:
+    """Premiers n articles → lignes au format colonnes EBP (pour le tableau éditable)."""
+    rows = []
+    for a in articles[:n]:
+        r = _build_article_ebp_row(
+            a, params["fournisseur_code"], params["remise"], params["unite_defaut"],
+            "TVA20", params["taux_tva"], params["prix_sont_ttc"],
+        )
+        rows.append([r[c] for c in COLS_ARTICLES_EBP])
+    return rows
+
+
+def _apply_preview_edits(articles: list[dict], edited_rows) -> list[dict]:
+    """
+    Réinjecte les corrections de l'aperçu (libellé, prix HT, unité, famille)
+    dans la liste complète, par appariement sur le « Code article » (référence).
+    Les colonnes dérivées (PV TTC, Prix d'achat…) sont recalculées à l'export.
+    """
+    if edited_rows is None:
+        return articles
+    rows = edited_rows.values.tolist() if hasattr(edited_rows, "values") else list(edited_rows)
+
+    idx = {c: i for i, c in enumerate(COLS_ARTICLES_EBP)}
+    by_ref: dict[str, dict] = {}
+    for a in articles:
+        ref = str(a.get("reference") or a.get("code") or "").strip()
+        if ref and ref not in by_ref:
+            by_ref[ref] = a
+
+    for row in rows:
+        if not row or len(row) < len(COLS_ARTICLES_EBP):
+            continue
+        ref = str(row[idx["Code article"]]).strip()
+        a = by_ref.get(ref)
+        if a is None:
+            continue
+        a["nom_dessin"]        = str(row[idx["Libellé"]]).strip()
+        a["unite"]             = str(row[idx["Code unité"]]).strip()
+        a["code_sous_famille"] = str(row[idx["Code sous-famille article"]]).strip().upper()
+        pvht = str(row[idx["PV HT public conseillé"]]).replace(",", ".").strip()
+        try:
+            if pvht:
+                a["prix_conseille"] = float(pvht)
+        except ValueError:
+            pass
+    return articles
+
+
+def run_preview(
+    pdf_file, page_from, page_to, fournisseur_nom, fournisseur_code, code_famille,
+    remise, prix_sont_ttc, taux_tva_label, unite_defaut, sample_mode, profil_nom_save,
+    collection_famille_map_json, regex_config_json, analyse_familles, classif_llm,
+    progress=gr.Progress(),
+):
+    if pdf_file is None:
+        return None, gr.update(), "⚠️ Aucun fichier PDF fourni.", ""
+    try:
+        params = _build_params(
+            fournisseur_nom, fournisseur_code, code_famille, remise, prix_sont_ttc,
+            taux_tva_label, unite_defaut, sample_mode, profil_nom_save,
+            collection_famille_map_json, regex_config_json, analyse_familles, classif_llm,
+        )
+    except ValueError as exc:
+        return None, gr.update(), f"⚠️ {exc}", ""
+
+    def _cb(done, total):
+        progress(done / max(total, 1), desc=f"Batch {done}/{total}")
+
+    try:
+        progress(0, desc="Extraction + analyse pour aperçu…")
+        valides, anomalies, rapport, rapport_familles = _extract_and_analyse(
+            pdf_file.name, page_from, page_to, params, _cb,
+        )
+        if not valides and not anomalies:
+            return None, gr.update(visible=False), "⚠️ Aucun article détecté.", ""
+
+        preview_rows = _articles_to_preview(valides, params, PREVIEW_N)
+        state = {
+            "valides": valides, "anomalies": anomalies,
+            "rapport": rapport, "rapport_familles": rapport_familles,
+            "params": params,
+        }
+        info = (f"Aperçu de {min(PREVIEW_N, len(valides))} réf. sur {len(valides)}. "
+                "Corrige le tableau (famille, libellé, prix HT, unité) puis clique « Exporter ».")
+        progress(1.0, desc="Aperçu prêt")
+        return (state, gr.update(value=preview_rows, visible=True),
+                info, _anomalies_preview(anomalies))
+    except Exception as exc:
+        tb = traceback.format_exc()
+        return None, gr.update(visible=False), f"❌ Erreur : {exc}\n\n{tb[-600:]}", ""
+
+
+def run_export_from_preview(state, edited_rows, progress=gr.Progress()):
+    if not state:
+        return None, "⚠️ Lance d'abord un aperçu avant d'exporter.", ""
+    try:
+        progress(0.2, desc="Application des corrections…")
+        valides = _apply_preview_edits(state["valides"], edited_rows)
+        params  = state["params"]
+
+        # Répartition familles recalculée après édition
+        rapport_familles = state["rapport_familles"]
+        if params["analyse_familles"]:
+            repart: dict[str, int] = {}
+            for a in valides:
+                fam = a.get("code_sous_famille", "DIVERS")
+                repart[fam] = repart.get(fam, 0) + 1
+            if rapport_familles:
+                rapport_familles = dict(rapport_familles)
+                rapport_familles["repartition"] = dict(sorted(repart.items(), key=lambda kv: -kv[1]))
+
+        progress(0.6, desc="Écriture des CSV…")
+        zip_path, rapport_txt = _do_export(
+            valides, state["anomalies"], state["rapport"], rapport_familles, params,
+        )
+        progress(1.0, desc="Terminé !")
+        return zip_path, rapport_txt, _anomalies_preview(state["anomalies"])
+    except Exception as exc:
+        tb = traceback.format_exc()
+        return None, f"❌ Erreur : {exc}\n\n{tb[-600:]}", ""
+
+
+def run_conversion(
+    pdf_file, page_from, page_to, fournisseur_nom, fournisseur_code, code_famille,
+    remise, prix_sont_ttc, taux_tva_label, unite_defaut, sample_mode, profil_nom_save,
+    collection_famille_map_json, regex_config_json, analyse_familles, classif_llm,
+    progress=gr.Progress(),
+):
+    """Conversion directe sans aperçu (un seul clic)."""
+    if pdf_file is None:
+        return None, "⚠️ Aucun fichier PDF fourni.", "", ""
+    try:
+        params = _build_params(
+            fournisseur_nom, fournisseur_code, code_famille, remise, prix_sont_ttc,
+            taux_tva_label, unite_defaut, sample_mode, profil_nom_save,
+            collection_famille_map_json, regex_config_json, analyse_familles, classif_llm,
+        )
+    except ValueError as exc:
+        return None, f"⚠️ {exc}", "", ""
+
+    def _cb(done, total):
         progress(done / max(total, 1), desc=f"Batch {done}/{total}")
 
     try:
         progress(0, desc="Extraction en cours…")
-        valides, anomalies, rapport = extract_articles(
-            pdf_path=pdf_file.name,
-            page_from=page_from,
-            page_to=page_to,
-            password="",
-            default_unit=unite_defaut,
-            progress_cb=_progress_cb,
-            sample_mode=sample_mode,
-            regex_config=regex_config,
+        valides, anomalies, rapport, rapport_familles = _extract_and_analyse(
+            pdf_file.name, page_from, page_to, params, _cb,
         )
-
         if not valides and not anomalies:
             return None, "⚠️ Aucun article détecté dans ces pages.", "", ""
 
-        # Export CSV
         progress(0.9, desc="Écriture des fichiers CSV…")
-        out_dir = tempfile.mkdtemp(prefix="ebp_export_")
-        export_ebp(
-            articles=valides,
-            output_dir=out_dir,
-            fournisseur_nom=fournisseur_nom,
-            fournisseur_code=fournisseur_code,
-            remise=remise,
-            unite_defaut=unite_defaut,
-            code_famille=code_famille,
-            prix_sont_ttc=prix_sont_ttc,
-            taux_tva=taux_tva,
-            collection_famille_map=collection_famille_map,
+        zip_path, rapport_txt = _do_export(
+            valides, anomalies, rapport, rapport_familles, params,
         )
-
-        # Rapport d'audit
-        rapport_txt = _build_rapport(rapport, valides, anomalies, sample_mode)
-        rapport_path = os.path.join(out_dir, "rapport_conversion.txt")
-        Path(rapport_path).write_text(rapport_txt, encoding="utf-8")
-
-        # Anomalies CSV
-        if anomalies:
-            anomalies_path = os.path.join(out_dir, "anomalies.csv")
-            _write_anomalies(anomalies, anomalies_path)
-
-        # ZIP de sortie
-        zip_path = os.path.join(out_dir, "export_ebp.zip")
-        with zipfile.ZipFile(zip_path, "w") as zf:
-            for f in Path(out_dir).glob("*.csv"):
-                zf.write(f, f.name)
-            zf.write(rapport_path, "rapport_conversion.txt")
-
         progress(1.0, desc="Terminé !")
         return zip_path, rapport_txt, _anomalies_preview(anomalies), ""
-
     except Exception as exc:
         tb = traceback.format_exc()
         return None, f"❌ Erreur : {exc}\n\n{tb[-800:]}", "", ""
 
 
-def _build_rapport(rapport: dict, valides, anomalies, sample_mode: bool) -> str:
+def _build_rapport(rapport: dict, valides, anomalies, sample_mode: bool,
+                   rapport_familles: dict | None = None) -> str:
     mode_extract = rapport.get("mode", "text")
     lines = [
         "═══ RAPPORT DE CONVERSION ═══",
@@ -200,6 +384,20 @@ def _build_rapport(rapport: dict, valides, anomalies, sample_mode: bool) -> str:
         "  2. 2_fournisseur.csv",
         "  3. 3_articles.csv",
     ]
+
+    # ── Bilan analyse des sous-familles ───────────────────────────────────────
+    if rapport_familles:
+        lines += [
+            "",
+            "── Analyse des sous-familles ──",
+            f"Total classé : {rapport_familles['total']}",
+            f"  par règles : {rapport_familles['par_regles']}",
+            f"  par LLM    : {rapport_familles['par_llm']}",
+            f"  par défaut : {rapport_familles['par_defaut']}",
+            "Répartition (1 CSV par famille) :",
+        ]
+        for fam, n in rapport_familles["repartition"].items():
+            lines.append(f"  • articles_{fam}.csv : {n} article(s)")
 
     # Top 10 prix les plus élevés
     avec_prix = [a for a in valides if a.get("prix_conseille", 0) > 0]
@@ -341,7 +539,45 @@ with gr.Blocks(title="PDF → CSV EBP", theme=gr.themes.Soft()) as demo:
                 lines=3,
             )
 
-    btn_convert = gr.Button("▶️  Lancer la conversion", variant="primary", size="lg")
+    with gr.Row():
+        with gr.Column():
+            gr.Markdown("### 🗂️ Analyse des sous-familles")
+            gr.Markdown(
+                "Classe chaque article dans sa famille EBP "
+                "(TAPISSERIE · RIDEAU · MOUSSE · SELLERIE) et produit "
+                "**1 fichier CSV par famille** au format écran « Articles » EBP."
+            )
+            analyse_familles_toggle = gr.Checkbox(
+                label="Activer l'analyse des sous-familles (export par famille)",
+                value=True,
+            )
+            classif_llm_toggle = gr.Checkbox(
+                label="Affiner les cas ambigus avec Claude (sinon règles seules)",
+                value=True,
+            )
+
+    with gr.Row():
+        btn_preview = gr.Button("👁️ Aperçu éditable (10 réf.)", variant="secondary", size="lg")
+        btn_convert = gr.Button("▶️ Convertir directement (sans aperçu)", variant="primary", size="lg")
+
+    # ── Aperçu éditable avant export ─────────────────────────────────────────
+    gr.Markdown("### ✏️ Aperçu éditable — corrige avant l'export")
+    preview_info = gr.Textbox(label="Aperçu", interactive=False, lines=2)
+    preview_table = gr.Dataframe(
+        headers=COLS_ARTICLES_EBP,
+        datatype=["str"] * len(COLS_ARTICLES_EBP),
+        col_count=(len(COLS_ARTICLES_EBP), "fixed"),
+        type="pandas",
+        interactive=True,
+        # « Code article » (clé d'appariement) verrouillé ; colonnes éditables.
+        static_columns=[0],
+        wrap=True,
+        visible=False,
+        label="Échantillon — colonnes éditables, sauf « Code article »",
+    )
+    btn_export = gr.Button("📦 Exporter l'aperçu validé", variant="primary", size="lg")
+
+    preview_state = gr.State()
 
     with gr.Row():
         zip_output     = gr.File(label="📦 Télécharger les fichiers CSV (ZIP)")
@@ -350,6 +586,16 @@ with gr.Blocks(title="PDF → CSV EBP", theme=gr.themes.Soft()) as demo:
     anomalies_output = gr.Textbox(label="⚠️ Anomalies (prix non traçables)", lines=6, interactive=False)
     err_output       = gr.Textbox(label="Erreur", visible=False)
 
+    _convert_inputs = [
+        pdf_input, page_from, page_to,
+        fournisseur_nom, fournisseur_code,
+        code_famille, remise_input, prix_ttc_toggle,
+        taux_tva, unite_def,
+        sample_mode, profil_save_nom,
+        collection_famille_map_input, regex_config_input,
+        analyse_familles_toggle, classif_llm_toggle,
+    ]
+
     # ── Événements ──────────────────────────────────────────────────────────
     btn_debug.click(
         fn=run_debug_layout,
@@ -357,16 +603,21 @@ with gr.Blocks(title="PDF → CSV EBP", theme=gr.themes.Soft()) as demo:
         outputs=[debug_output],
     ).then(fn=lambda: gr.update(visible=True), outputs=[debug_output])
 
+    btn_preview.click(
+        fn=run_preview,
+        inputs=_convert_inputs,
+        outputs=[preview_state, preview_table, preview_info, anomalies_output],
+    )
+
+    btn_export.click(
+        fn=run_export_from_preview,
+        inputs=[preview_state, preview_table],
+        outputs=[zip_output, rapport_output, anomalies_output],
+    )
+
     btn_convert.click(
         fn=run_conversion,
-        inputs=[
-            pdf_input, page_from, page_to,
-            fournisseur_nom, fournisseur_code,
-            code_famille, remise_input, prix_ttc_toggle,
-            taux_tva, unite_def,
-            sample_mode, profil_save_nom,
-            collection_famille_map_input, regex_config_input,
-        ],
+        inputs=_convert_inputs,
         outputs=[zip_output, rapport_output, anomalies_output, err_output],
     )
 

@@ -43,6 +43,20 @@ COLS_FOURNISSEUR = [
     "Téléphone", "Email", "Famille fournisseur", "Conditions de règlement",
 ]
 
+# ── Colonnes article EBP (écran « Articles » — capture utilisateur) ──────────
+# Mapping FIXE, aligné exactement sur l'écran EBP fourni. Ordre verrouillé.
+COLS_ARTICLES_EBP = [
+    "Code article",
+    "Libellé",
+    "PV HT public conseillé",
+    "PV TTC",
+    "Code unité",
+    "Prix d'achat",
+    "Montant de TVA",
+    "Code fournisseur",
+    "Code sous-famille article",
+]
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -206,6 +220,97 @@ def export_ebp(
         "2_fournisseur.csv":       path_fournisseur,
         "3_articles.csv":          path_articles,
     }
+
+
+def _prix_ttc_from_ht(prix_ht: float, taux_tva: float) -> float:
+    if prix_ht <= 0:
+        return 0.0
+    return round(prix_ht * (1 + taux_tva / 100), 2)
+
+
+def _safe_filename(name: str) -> str:
+    return "".join(c if c.isalnum() or c in "-_" else "_" for c in str(name)).strip("_") or "DIVERS"
+
+
+def _build_article_ebp_row(
+    a: dict,
+    fournisseur_code: str,
+    remise: float,
+    unite_defaut: str,
+    code_tva: str,
+    taux_tva: float,
+    prix_sont_ttc: bool,
+) -> dict:
+    """Construit une ligne au format écran « Articles » EBP."""
+    ref        = str(a.get("reference") or a.get("code") or "").strip()
+    libelle    = _truncate(a.get("nom_dessin") or a.get("libelle") or "", 80)
+    unite_art  = str(a.get("unite") or unite_defaut).strip()
+    remise_art = float(a.get("remise_specifique") or remise)
+    famille    = str(a.get("code_sous_famille") or "").strip()
+
+    prix_brut_val = float(a.get("prix_conseille") or a.get("prix_ttc") or 0)
+    if prix_sont_ttc and prix_brut_val > 0:
+        prix_ht = prix_ht_from_ttc(prix_brut_val, taux_tva)
+    else:
+        prix_ht = prix_brut_val
+
+    prix_ttc   = _prix_ttc_from_ht(prix_ht, taux_tva)
+    prix_achat = prix_achat_from_conseille(prix_ht, remise_art)
+
+    return {
+        "Code article":             ref,
+        "Libellé":                  libelle,
+        "PV HT public conseillé":   _fmt_decimal(prix_ht) if prix_ht else "",
+        "PV TTC":                   _fmt_decimal(prix_ttc) if prix_ttc else "",
+        "Code unité":               unite_art,
+        "Prix d'achat":             _fmt_decimal(prix_achat) if prix_achat else "",
+        "Montant de TVA":           code_tva,
+        "Code fournisseur":         fournisseur_code,
+        "Code sous-famille article": famille,
+    }
+
+
+def export_articles_par_famille(
+    articles: list[dict],
+    output_dir: str,
+    fournisseur_code: str,
+    remise: float = 45.0,
+    unite_defaut: str = "ml",
+    code_tva: str = "TVA20",
+    taux_tva: float = 20.0,
+    prix_sont_ttc: bool = False,
+) -> dict[str, str]:
+    """
+    Export EBP « écran Articles » : 1 fichier CSV par famille (code_sous_famille).
+
+    Chaque article doit avoir été annoté au préalable par
+    core.subfamily.analyse_sous_familles (clé `code_sous_famille`).
+
+    Nommage : articles_<FAMILLE>.csv. Retourne {nom_fichier: chemin_absolu}.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    from collections import defaultdict
+    groupes: dict[str, list[dict]] = defaultdict(list)
+    for a in articles:
+        famille = str(a.get("code_sous_famille") or "DIVERS").strip() or "DIVERS"
+        groupes[famille].append(a)
+
+    produits: dict[str, str] = {}
+    for famille in sorted(groupes):
+        rows = [
+            _build_article_ebp_row(
+                a, fournisseur_code, remise, unite_defaut,
+                code_tva, taux_tva, prix_sont_ttc,
+            )
+            for a in groupes[famille]
+        ]
+        fname = f"articles_{_safe_filename(famille)}.csv"
+        path = os.path.join(output_dir, fname)
+        _write_csv(rows, COLS_ARTICLES_EBP, path)
+        produits[fname] = path
+
+    return produits
 
 
 def _make_famille_code(libelle: str) -> str:
