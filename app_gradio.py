@@ -261,19 +261,20 @@ with gr.Blocks(title="Atelier — Outils EBP", theme=gr.themes.Soft()) as demo:
                     clean_report_out = gr.Textbox(label="📊 Rapport de nettoyage",
                                                   lines=16, interactive=False)
 
-        # ══════════ ONGLET 2 : CSV → EBP par zone ══════════
-        with gr.Tab("📄 CSV → EBP par zone"):
-            gr.Markdown(
-                "Charge un CSV : il est **découpé par zone** (séparation / décalage) et "
-                "**chaque zone est réalignée**. Corrige chaque zone dans son éditeur "
-                "(aperçu 3 lignes), **mappe les colonnes → EBP** (affiché après l'upload), "
-                "puis **Exporter** : 1 CSV EBP par zone (9 colonnes + **Taux de marge**)."
-            )
-            zone_csv_in = gr.File(label="CSV à traiter", file_types=[".csv", ".tsv", ".txt"])
-            zone_info   = gr.Textbox(label="Zones détectées", interactive=False, lines=2)
+        # États partagés entre l'onglet Analyse et l'onglet Conversion
+        zones_state = gr.State([])
+        edits_state = gr.State({})
 
-            zones_state = gr.State([])
-            edits_state = gr.State({})
+        # ══════════ ONGLET 2 : ANALYSE (avant conversion) ══════════
+        with gr.Tab("🔎 Analyse"):
+            gr.Markdown(
+                "**Étape 1 — Analyse.** Charge un CSV : il est **découpé par zone** "
+                "(séparation / décalage) et **chaque zone est réalignée**. Corrige chaque "
+                "zone dans son éditeur (aperçu 3 lignes) et **mappe les colonnes → EBP** "
+                "(affiché après l'upload). Passe ensuite à l'onglet **Conversion EBP**."
+            )
+            zone_csv_in = gr.File(label="CSV à analyser", file_types=[".csv", ".tsv", ".txt"])
+            zone_info   = gr.Textbox(label="Zones détectées", interactive=False, lines=2)
 
             gr.Markdown("### ✏️ Éditeurs de zone")
 
@@ -305,18 +306,25 @@ with gr.Blocks(title="Atelier — Outils EBP", theme=gr.themes.Soft()) as demo:
 
             gr.Markdown("### 🔗 Mapping colonnes → EBP (rempli après l'upload)")
             with gr.Row():
-                with gr.Column(scale=2):
-                    col_ref   = gr.Dropdown(label="Référence (Code article) *", choices=[])
-                    col_lib   = gr.Dropdown(label="Libellé *", choices=[])
-                    col_pa    = gr.Dropdown(label="Prix d'achat HT (PA)", choices=[NONE_COL], value=NONE_COL)
-                    col_pv    = gr.Dropdown(label="Prix de vente HT (PV)", choices=[NONE_COL], value=NONE_COL)
-                    col_unite = gr.Dropdown(label="Unité (laissée telle quelle)", choices=[NONE_COL], value=NONE_COL)
-                with gr.Column(scale=1):
-                    csv_fourn_code = gr.Textbox(label="Code fournisseur", placeholder="Ex : CAS001")
-                    csv_taux_tva   = gr.Radio([l for l, _ in TVA_CHOICES], value="20 %",
-                                              label="Taux TVA (pour le PV TTC)")
+                col_ref   = gr.Dropdown(label="Référence (Code article) *", choices=[])
+                col_lib   = gr.Dropdown(label="Libellé *", choices=[])
+            with gr.Row():
+                col_pa    = gr.Dropdown(label="Prix d'achat HT (PA)", choices=[NONE_COL], value=NONE_COL)
+                col_pv    = gr.Dropdown(label="Prix de vente HT (PV)", choices=[NONE_COL], value=NONE_COL)
+                col_unite = gr.Dropdown(label="Unité (laissée telle quelle)", choices=[NONE_COL], value=NONE_COL)
 
-            btn_zone_export = gr.Button("📦 Exporter EBP par zone (ZIP)", variant="primary", size="lg")
+        # ══════════ ONGLET 3 : CONVERSION EBP (après analyse) ══════════
+        with gr.Tab("📦 Conversion EBP"):
+            gr.Markdown(
+                "**Étape 2 — Conversion.** Reprend l'analyse de l'onglet précédent (zones, "
+                "corrections, mapping) et produit **1 CSV EBP par zone** (9 colonnes + "
+                "**Taux de marge** = (PV−PA)/PV), plus `0_familles_articles.csv`, en ZIP."
+            )
+            with gr.Row():
+                csv_fourn_code = gr.Textbox(label="Code fournisseur", placeholder="Ex : CAS001")
+                csv_taux_tva   = gr.Radio([l for l, _ in TVA_CHOICES], value="20 %",
+                                          label="Taux TVA (pour le PV TTC)")
+            btn_zone_export = gr.Button("📦 Convertir & exporter (ZIP)", variant="primary", size="lg")
             with gr.Row():
                 zone_zip    = gr.File(label="📦 Télécharger les CSV EBP (ZIP)")
                 zone_report = gr.Textbox(label="📊 Rapport d'export", lines=12, interactive=False)
