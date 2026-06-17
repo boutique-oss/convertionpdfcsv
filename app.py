@@ -1,68 +1,39 @@
-import asyncio
 import os
-import shutil
 import tempfile
+import time
 import traceback
-import uuid
-from concurrent.futures import ThreadPoolExecutor
 
-from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from core.agent import extract_articles
-from core.csv_writer import to_csv
+from core.cleaner import clean_csv
 
-load_dotenv()
-
-app = FastAPI(title="PDF → CSV Agent")
+app = FastAPI(title="Nettoyeur CSV")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
-_executor = ThreadPoolExecutor(max_workers=2)
 
-_jobs: dict[str, dict] = {}
+MAX_CSV_MB = 50
 
-MAX_PDF_MB = 50
+# Résultats temporaires : {download_id: (chemin, nom_origine, timestamp)}
+_results: dict[str, tuple[str, str, float]] = {}
+_RESULT_TTL = 3600  # 1 h
 
 
-def _run_job(job_id: str, pdf_path: str, page_from: int, page_to: int,
-             default_unit: str, brand: str, password: str):
-    try:
-        def _progress(done, total):
-            _jobs[job_id]["progress"] = f"{done}/{total}"
-
-        articles = extract_articles(
-            pdf_path, page_from, page_to, password, default_unit, progress_cb=_progress
-        )
-        if not articles:
-            _jobs[job_id] = {"status": "error", "error": "Aucun article détecté dans ces pages."}
-            return
-
-        out = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
-        out.close()
-        to_csv(articles, out.name, brand)
-        _jobs[job_id] = {
-            "status": "done",
-            "result": out.name,
-            "count": len(articles),
-        }
-
-    except Exception as exc:
-        _jobs[job_id] = {
-            "status": "error",
-            "error": f"{type(exc).__name__}: {exc}\n{traceback.format_exc()[-500:]}",
-        }
-    finally:
-        try:
-            os.unlink(pdf_path)
-        except OSError:
-            pass
+def _purge_old():
+    now = time.time()
+    for did, (path, _name, ts) in list(_results.items()):
+        if now - ts > _RESULT_TTL:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            _results.pop(did, None)
 
 
 @app.get("/ping")
@@ -70,105 +41,97 @@ async def ping():
     return {"ok": True}
 
 
-@app.post("/preview")
-async def preview(
-    pdf: UploadFile = File(...),
-    page_from: int = Form(1),
-    page_to: int = Form(3),
-    password: str = Form(""),
-):
-    """Retourne les 300 premiers caractères de chaque page pour diagnostic."""
-    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-        shutil.copyfileobj(pdf.file, tmp)
-        pdf_path = tmp.name
-    try:
-        pages = extract_pages(pdf_path, page_from, page_to, password)
-        previews = [
-            {"page": page_from + i, "chars": len(p), "extract": p[:300]}
-            for i, p in enumerate(pages)
-        ]
-        return JSONResponse({"pages": previews})
-    finally:
-        os.unlink(pdf_path)
-
-
 @app.get("/")
 async def index():
     return FileResponse("static/index.html")
 
 
-@app.post("/extract")
-async def extract(
-    pdf: UploadFile = File(...),
-    page_from: int = Form(1),
-    page_to: int = Form(10),
-    default_unit: str = Form("Pièce"),
-    brand: str = Form(""),
-    password: str = Form(""),
+@app.post("/clean")
+async def clean(
+    csv_file: UploadFile = File(...),
+    drop_empty: bool = Form(True),
+    drop_duplicates: bool = Form(True),
+    trim_whitespace: bool = Form(True),
+    normalize_headers: bool = Form(True),
+    remove_symbols: bool = Form(False),
+    keep_digits_only: bool = Form(False),
+    decimal_comma: bool = Form(False),
+    ebp_format: bool = Form(False),
 ):
-    if not pdf.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Le fichier doit être un PDF.")
-    if page_to > 300:
-        raise HTTPException(status_code=400, detail="Limite : 300 pages maximum.")
-    if page_from > page_to:
-        raise HTTPException(status_code=400, detail="Page de début > page de fin.")
+    name = csv_file.filename or "fichier.csv"
+    if not name.lower().endswith((".csv", ".txt", ".tsv")):
+        raise HTTPException(status_code=400, detail="Le fichier doit être un .csv, .tsv ou .txt.")
 
-    # Sauvegarde du PDF en lisant par chunks pour éviter l'OOM
-    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-        size = 0
-        chunk_size = 1024 * 1024  # 1 MB
-        while True:
-            chunk = await pdf.read(chunk_size)
-            if not chunk:
-                break
-            size += len(chunk)
-            if size > MAX_PDF_MB * 1024 * 1024:
-                os.unlink(tmp.name)
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"PDF trop volumineux (max {MAX_PDF_MB} MB)."
-                )
-            tmp.write(chunk)
-        pdf_path = tmp.name
+    raw = b""
+    chunk_size = 1024 * 1024
+    while True:
+        chunk = await csv_file.read(chunk_size)
+        if not chunk:
+            break
+        raw += chunk
+        if len(raw) > MAX_CSV_MB * 1024 * 1024:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Fichier trop volumineux (max {MAX_CSV_MB} MB).",
+            )
 
-    job_id = str(uuid.uuid4())
-    _jobs[job_id] = {"status": "processing"}
+    if not raw.strip():
+        raise HTTPException(status_code=400, detail="Le fichier est vide.")
 
-    loop = asyncio.get_event_loop()
-    loop.run_in_executor(
-        _executor,
-        _run_job,
-        job_id, pdf_path, page_from, page_to, default_unit, brand, password,
-    )
+    options = {
+        "drop_empty": drop_empty,
+        "drop_duplicates": drop_duplicates,
+        "trim_whitespace": trim_whitespace,
+        "normalize_headers": normalize_headers,
+        "remove_symbols": remove_symbols,
+        "keep_digits_only": keep_digits_only,
+        "decimal_comma": decimal_comma,
+        "ebp_format": ebp_format,
+    }
 
-    return JSONResponse({"job_id": job_id})
+    try:
+        cleaned, report = clean_csv(raw, options)
+    except Exception as exc:  # noqa: BLE001
+        detail = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()[-400:]}"
+        raise HTTPException(status_code=422, detail=detail)
 
+    _purge_old()
+    out = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
+    out.write(cleaned)
+    out.close()
 
-@app.get("/status/{job_id}")
-async def status(job_id: str):
-    job = _jobs.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job introuvable.")
-    if job["status"] == "error":
-        return JSONResponse({"status": "error", "error": job["error"]})
-    if job["status"] == "done":
-        return JSONResponse({"status": "done", "count": job["count"]})
-    if job.get("progress"):
-        return JSONResponse({"status": "processing", "progress": job["progress"]})
-    return JSONResponse({"status": "processing"})
+    download_id = os.path.splitext(os.path.basename(out.name))[0]
+    base, ext = os.path.splitext(os.path.basename(name))
+    out_name = f"{base}_nettoye{ext or '.csv'}"
+    _results[download_id] = (out.name, out_name, time.time())
+
+    return JSONResponse({"download_id": download_id, "report": report})
 
 
-@app.get("/download/{job_id}")
-async def download(job_id: str):
-    job = _jobs.get(job_id)
-    if not job or job["status"] != "done":
-        raise HTTPException(status_code=404, detail="Résultat non disponible.")
+@app.get("/download/{download_id}")
+async def download(download_id: str):
+    entry = _results.get(download_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Résultat expiré ou introuvable.")
+    path, out_name, _ts = entry
     return FileResponse(
-        job["result"],
-        filename="articles.csv",
+        path,
+        filename=out_name,
         media_type="text/csv; charset=utf-8",
-        headers={"X-Article-Count": str(job["count"])},
     )
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+# ── Extracteur catalogue PDF → CSV EBP (UI Gradio) ───────────────────────────
+# Monté sur /extracteur. Inclut l'analyse des sous-familles et l'aperçu éditable.
+# Isolé dans un try : si une dépendance lourde (PyMuPDF/anthropic/gradio) manque,
+# le nettoyeur CSV reste disponible sur /.
+try:
+    import gradio as gr
+    from app_gradio import demo as _extracteur_demo
+
+    app = gr.mount_gradio_app(app, _extracteur_demo, path="/extracteur")
+except Exception as exc:  # noqa: BLE001
+    print(f"[extracteur] UI Gradio non montée : {type(exc).__name__}: {exc}")

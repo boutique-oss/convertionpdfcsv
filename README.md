@@ -1,24 +1,28 @@
 ---
-title: PDF CSV Agent
-emoji: 📄
+title: Nettoyeur CSV
+emoji: 🧹
 colorFrom: blue
 colorTo: green
 sdk: docker
 pinned: false
 ---
 
-# PDF → CSV Agent
+# Nettoyeur CSV
 
-Extrait les articles d'un catalogue PDF et génère un fichier CSV tarifaire prêt à l'import.
+Charge un fichier CSV, choisis les opérations de nettoyage et récupère un fichier propre.
+100 % automatique, sans IA ni clé API.
 
-## Fonctionnement
+## Opérations
 
-1. Chargez un PDF de catalogue fournisseur
-2. Sélectionnez la plage de pages à analyser
-3. Renseignez votre taux de marge et l'unité par défaut
-4. Cliquez **Extraire → CSV** — l'IA (Claude Sonnet) analyse le texte et produit le CSV
+- **Lignes & colonnes vides** — supprime les lignes/colonnes entièrement vides
+- **Doublons** — supprime les lignes identiques en double
+- **Espaces superflus** — nettoie les espaces en début/fin et les doubles espaces
+- **En-têtes propres** — nettoie et dé-duplique les noms de colonnes
+- **Virgule décimale (FR)** — convertit `1234.56` → `1234,56` et retire les séparateurs de milliers
+- **Format EBP** — sortie séparateur `;`, encodage UTF-8 BOM, fins de ligne Windows (`\r\n`)
 
-Le CSV contient : `Code article`, `Libellé`, `PV HT` (calculé depuis le prix TTC et la marge), `Unité`.
+L'encodage (UTF-8, CP1252, Latin-1…) et le séparateur (`;`, `,`, tab, `|`) du fichier
+d'entrée sont détectés automatiquement.
 
 ## Installation
 
@@ -32,38 +36,22 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Créez un fichier `.env` à partir de `.env.example` et renseignez votre clé API Anthropic :
-
-```
-ANTHROPIC_API_KEY=sk-ant-...
-```
-
 ## Lancement
 
 ```bash
-python app.py
+uvicorn app:app --host 0.0.0.0 --port 7860
 ```
 
-L'interface Gradio s'ouvre sur `http://localhost:7860`.
+Puis ouvre `http://localhost:7860`.
 
 ## Structure
 
 ```
 core/
-  extractor.py   # extraction texte PDF (PyMuPDF)
-  agent.py       # appel Claude Sonnet → JSON articles
-  csv_writer.py  # calcul PV HT + export CSV (pandas)
-app.py           # interface Gradio
-docs/            # GitHub Pages landing
+  cleaner.py   # détection encodage/séparateur + nettoyage pandas
+app.py         # API FastAPI (/clean, /download)
+static/        # interface web
 ```
-
-## Formule de calcul
-
-```
-PV HT = Prix TTC / (1 + marge%)
-```
-
-Exemple avec marge 30 % : `100 € TTC → 76,92 € HT`
 
 ## Licence
 

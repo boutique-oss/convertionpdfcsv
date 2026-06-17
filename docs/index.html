@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PDF → CSV Agent</title>
+  <title>Nettoyeur CSV</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -56,22 +56,22 @@
 </head>
 <body>
   <div class="card">
-    <h1>PDF → CSV Agent</h1>
-    <a class="badge" href="https://github.com/boutique-oss/convertionpdfcsv/releases">v1.0.0</a>
+    <h1>Nettoyeur CSV</h1>
+    <a class="badge" href="https://github.com/boutique-oss/convertionpdfcsv/releases">v2.0.0</a>
 
     <p>
-      Outil open-source qui extrait automatiquement les articles d'un catalogue PDF
-      (code, libellé, prix TTC) et génère un fichier CSV tarifaire prêt à l'import,
-      avec calcul du prix de vente HT selon votre taux de marge.
+      Outil open-source qui nettoie automatiquement vos fichiers CSV : doublons,
+      lignes et colonnes vides, espaces superflus, en-têtes brouillons, encodage
+      et séparateurs détectés à la volée. 100 % local, sans IA ni clé API.
     </p>
 
     <p><strong>Fonctionnalités :</strong></p>
     <ul>
-      <li>Extraction de texte page par page via PyMuPDF</li>
-      <li>Analyse IA (Claude Sonnet) avec sortie JSON stricte</li>
-      <li>Calcul automatique du PV HT depuis le prix TTC et la marge</li>
-      <li>Interface Gradio — aucun code requis</li>
-      <li>CSV encodé UTF-8 BOM, séparateur point-virgule (compatible Excel)</li>
+      <li>Détection auto de l'encodage (UTF-8, CP1252, Latin-1…) et du séparateur</li>
+      <li>Suppression des doublons et des lignes/colonnes vides</li>
+      <li>Nettoyage des espaces superflus et des en-têtes de colonnes</li>
+      <li>Conversion des nombres en virgule décimale française</li>
+      <li>Export au format EBP (séparateur « ; », UTF-8 BOM, fins de ligne Windows)</li>
     </ul>
 
     <div class="actions">
