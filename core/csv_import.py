@@ -46,7 +46,7 @@ GUESS = {
     "reference": ["référence", "reference", "réf", "ref", "code article", "code"],
     "libelle":   ["libellé", "libelle", "désignation", "designation", "nom", "dessin", "article", "produit"],
     "prix":      ["prix", "pv", "tarif", "montant", "conseillé"],
-    "unite":     ["unité", "unite", "unit", "cond", "vente", "ml"],
+    "unite":     ["unité", "unite", "unit", "cond", "condit"],
 }
 
 
